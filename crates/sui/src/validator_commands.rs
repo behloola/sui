@@ -9,31 +9,33 @@ use std::{
     fs,
     path::PathBuf,
 };
-use sui_config::genesis::GenesisValidatorInfo;
-use sui_framework::{SuiSystem, SystemPackage};
+use sui_genesis_builder::validator_info::GenesisValidatorInfo;
 
 use sui_types::{
     base_types::{ObjectID, ObjectRef, SuiAddress},
-    crypto::{AuthorityPublicKey, NetworkPublicKey},
+    crypto::{AuthorityPublicKey, NetworkPublicKey, Signable, DEFAULT_EPOCH_ID},
     multiaddr::Multiaddr,
     object::Owner,
     sui_system_state::{
         sui_system_state_inner_v1::{UnverifiedValidatorOperationCapV1, ValidatorV1},
         sui_system_state_summary::{SuiSystemStateSummary, SuiValidatorSummary},
     },
+    SUI_SYSTEM_PACKAGE_ID,
 };
 use tap::tap::TapOptional;
 
-use crate::client_commands::WalletContext;
 use crate::fire_drill::get_gas_obj_ref;
 use clap::*;
 use colored::Colorize;
-use fastcrypto::traits::KeyPair;
 use fastcrypto::traits::ToFromBytes;
+use fastcrypto::{
+    encoding::{Base64, Encoding},
+    traits::KeyPair,
+};
 use serde::Serialize;
-use shared_crypto::intent::Intent;
+use shared_crypto::intent::{Intent, IntentMessage, IntentScope};
 use sui_json_rpc_types::{
-    SuiObjectDataOptions, SuiTransactionResponse, SuiTransactionResponseOptions,
+    SuiObjectDataOptions, SuiTransactionBlockResponse, SuiTransactionBlockResponseOptions,
 };
 use sui_keys::keystore::AccountKeystore;
 use sui_keys::{
@@ -43,19 +45,19 @@ use sui_keys::{
         write_authority_keypair_to_file, write_keypair_to_file,
     },
 };
+use sui_sdk::wallet_context::WalletContext;
 use sui_sdk::SuiClient;
 use sui_types::crypto::{
     generate_proof_of_possession, get_authority_key_pair, AuthorityPublicKeyBytes,
 };
-use sui_types::messages::Transaction;
-use sui_types::messages::{CallArg, ObjectArg, TransactionData};
-use sui_types::{
-    crypto::{AuthorityKeyPair, NetworkKeyPair, SignatureScheme, SuiKeyPair},
-    SUI_SYSTEM_OBJ_CALL_ARG,
-};
+use sui_types::crypto::{AuthorityKeyPair, NetworkKeyPair, SignatureScheme, SuiKeyPair};
+use sui_types::transaction::{CallArg, ObjectArg, Transaction, TransactionData};
 
-// TODO adjust this to a reasonable number after the gas fix is in
-const DEFAULT_GAS_BUDGET: u64 = 15_000_000;
+#[path = "unit_tests/validator_tests.rs"]
+#[cfg(test)]
+mod validator_tests;
+
+const DEFAULT_GAS_BUDGET: u64 = 200_000_000; // 0.2 SUI
 
 #[derive(Parser)]
 #[clap(rename_all = "kebab-case")]
@@ -135,6 +137,32 @@ pub enum SuiValidatorCommand {
         #[clap(name = "gas-budget", long)]
         gas_budget: Option<u64>,
     },
+    /// Serialize the payload that is used to generate Proof of Possession.
+    /// This is useful to take the payload offline for an Authority protocol keypair to sign.
+    #[clap(name = "serialize-payload-pop")]
+    SerializePayloadForPoP {
+        /// Authority account address encoded in hex with 0x prefix.
+        #[clap(name = "account-address", long)]
+        account_address: SuiAddress,
+        /// Authority protocol public key encoded in hex.
+        #[clap(name = "protocol-public-key", long)]
+        protocol_public_key: AuthorityPublicKeyBytes,
+    },
+    /// Print out the serialized data of a transaction that sets the gas price quote for a validator.
+    DisplayGasPriceUpdateRawTxn {
+        /// Address of the transaction sender.
+        #[clap(name = "sender-address", long)]
+        sender_address: SuiAddress,
+        /// Object ID of a validator's OperationCap, used for setting gas price and reportng validators.
+        #[clap(name = "operation-cap-id", long)]
+        operation_cap_id: ObjectID,
+        /// Gas price to be set to.
+        #[clap(name = "new-gas-price", long)]
+        new_gas_price: u64,
+        /// Gas budget for this transaction.
+        #[clap(name = "gas-budget", long)]
+        gas_budget: Option<u64>,
+    },
 }
 
 #[derive(Serialize)]
@@ -142,12 +170,17 @@ pub enum SuiValidatorCommand {
 pub enum SuiValidatorCommandResponse {
     MakeValidatorInfo,
     DisplayMetadata,
-    BecomeCandidate(SuiTransactionResponse),
-    JoinCommittee(SuiTransactionResponse),
-    LeaveCommittee(SuiTransactionResponse),
-    UpdateMetadata(SuiTransactionResponse),
-    UpdateGasPrice(SuiTransactionResponse),
-    ReportValidator(SuiTransactionResponse),
+    BecomeCandidate(SuiTransactionBlockResponse),
+    JoinCommittee(SuiTransactionBlockResponse),
+    LeaveCommittee(SuiTransactionBlockResponse),
+    UpdateMetadata(SuiTransactionBlockResponse),
+    UpdateGasPrice(SuiTransactionBlockResponse),
+    ReportValidator(SuiTransactionBlockResponse),
+    SerializedPayload(String),
+    DisplayGasPriceUpdateRawTxn {
+        data: TransactionData,
+        serialized_data: String,
+    },
 }
 
 fn make_key_files(
@@ -172,7 +205,7 @@ fn make_key_files(
                 key
             }
             None => {
-                let (_, kp, _, _) = generate_new_key(SignatureScheme::ED25519, None)?;
+                let (_, kp, _, _) = generate_new_key(SignatureScheme::ED25519, None, None)?;
                 println!("Generated new key file: {:?}.", file_name);
                 kp
             }
@@ -224,14 +257,14 @@ impl SuiValidatorCommand {
                 let pop =
                     generate_proof_of_possession(&keypair, (&account_keypair.public()).into());
                 let validator_info = GenesisValidatorInfo {
-                    info: sui_config::ValidatorInfo {
+                    info: sui_genesis_builder::validator_info::ValidatorInfo {
                         name,
                         protocol_key: keypair.public().into(),
                         worker_key: worker_keypair.public().clone(),
                         account_address: SuiAddress::from(&account_keypair.public()),
                         network_key: network_keypair.public().clone(),
                         gas_price,
-                        commission_rate: 0,
+                        commission_rate: sui_config::node::DEFAULT_COMMISSION_RATE,
                         network_address: Multiaddr::try_from(format!(
                             "/dns/{}/tcp/8080/http",
                             host_name
@@ -253,7 +286,7 @@ impl SuiValidatorCommand {
                 };
                 // TODO set key files permission
                 let validator_info_file_name = dir.join("validator.info");
-                let validator_info_bytes = serde_yaml::to_vec(&validator_info)?;
+                let validator_info_bytes = serde_yaml::to_string(&validator_info)?;
                 fs::write(validator_info_file_name.clone(), validator_info_bytes)?;
                 println!(
                     "Generated validator info file: {:?}.",
@@ -376,6 +409,51 @@ impl SuiValidatorCommand {
                 .await?;
                 SuiValidatorCommandResponse::ReportValidator(resp)
             }
+
+            SuiValidatorCommand::SerializePayloadForPoP {
+                account_address,
+                protocol_public_key,
+            } => {
+                let mut msg: Vec<u8> = Vec::new();
+                msg.extend_from_slice(protocol_public_key.as_bytes());
+                msg.extend_from_slice(account_address.as_ref());
+                let mut intent_msg_bytes = bcs::to_bytes(&IntentMessage::new(
+                    Intent::sui_app(IntentScope::ProofOfPossession),
+                    msg,
+                ))
+                .expect("Message serialization should not fail");
+                DEFAULT_EPOCH_ID.write(&mut intent_msg_bytes);
+                SuiValidatorCommandResponse::SerializedPayload(Base64::encode(&intent_msg_bytes))
+            }
+
+            SuiValidatorCommand::DisplayGasPriceUpdateRawTxn {
+                sender_address,
+                operation_cap_id,
+                new_gas_price,
+                gas_budget,
+            } => {
+                let gas_budget = gas_budget.unwrap_or(DEFAULT_GAS_BUDGET);
+                let (_status, _summary, cap_obj_ref) =
+                    get_cap_object_ref(context, Some(operation_cap_id)).await?;
+
+                let args = vec![
+                    CallArg::Object(ObjectArg::ImmOrOwnedObject(cap_obj_ref)),
+                    CallArg::Pure(bcs::to_bytes(&new_gas_price).unwrap()),
+                ];
+                let data = construct_unsigned_0x5_txn(
+                    context,
+                    sender_address,
+                    "request_set_gas_price",
+                    args,
+                    gas_budget,
+                )
+                .await?;
+                let serialized_data = Base64::encode(bcs::to_bytes(&data)?);
+                SuiValidatorCommandResponse::DisplayGasPriceUpdateRawTxn {
+                    data,
+                    serialized_data,
+                }
+            }
         });
         ret
     }
@@ -439,7 +517,7 @@ async fn update_gas_price(
     operation_cap_id: Option<ObjectID>,
     gas_price: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionResponse> {
+) -> Result<SuiTransactionBlockResponse> {
     let (_status, _summary, cap_obj_ref) = get_cap_object_ref(context, operation_cap_id).await?;
 
     // TODO: Only active/pending validators can set gas price.
@@ -457,7 +535,7 @@ async fn report_validator(
     operation_cap_id: Option<ObjectID>,
     undo_report: bool,
     gas_budget: u64,
-) -> Result<SuiTransactionResponse> {
+) -> Result<SuiTransactionBlockResponse> {
     let (status, summary, cap_obj_ref) = get_cap_object_ref(context, operation_cap_id).await?;
 
     let validator_address = summary.sui_address;
@@ -516,15 +594,15 @@ async fn get_validator_summary_from_cap_id(
     Ok((status, summary))
 }
 
-async fn call_0x5(
+async fn construct_unsigned_0x5_txn(
     context: &mut WalletContext,
+    sender: SuiAddress,
     function: &'static str,
     call_args: Vec<CallArg>,
     gas_budget: u64,
-) -> anyhow::Result<SuiTransactionResponse> {
-    let sender = context.active_address()?;
+) -> anyhow::Result<TransactionData> {
     let sui_client = context.get_client().await?;
-    let mut args = vec![SUI_SYSTEM_OBJ_CALL_ARG];
+    let mut args = vec![CallArg::SUI_SYSTEM_MUT];
     args.extend(call_args);
     let rgp = sui_client
         .governance_api()
@@ -532,9 +610,9 @@ async fn call_0x5(
         .await?;
 
     let gas_obj_ref = get_gas_obj_ref(sender, &sui_client, gas_budget).await?;
-    let tx_data = TransactionData::new_move_call(
+    TransactionData::new_move_call(
         sender,
-        SuiSystem::ID,
+        SUI_SYSTEM_PACKAGE_ID,
         ident_str!("sui_system").to_owned(),
         ident_str!(function).to_owned(),
         vec![],
@@ -543,19 +621,32 @@ async fn call_0x5(
         gas_budget,
         rgp,
     )
-    .unwrap();
-    let signature = context
-        .config
-        .keystore
-        .sign_secure(&sender, &tx_data, Intent::default())?;
-    let transaction =
-        Transaction::from_data(tx_data, Intent::default(), vec![signature]).verify()?;
+}
+
+async fn call_0x5(
+    context: &mut WalletContext,
+    function: &'static str,
+    call_args: Vec<CallArg>,
+    gas_budget: u64,
+) -> anyhow::Result<SuiTransactionBlockResponse> {
+    let sender = context.active_address()?;
+    let tx_data =
+        construct_unsigned_0x5_txn(context, sender, function, call_args, gas_budget).await?;
+    let signature =
+        context
+            .config
+            .keystore
+            .sign_secure(&sender, &tx_data, Intent::sui_transaction())?;
+    let transaction = Transaction::from_data(tx_data, vec![signature]);
+    let sui_client = context.get_client().await?;
     sui_client
-        .quorum_driver()
-        .execute_transaction(
+        .quorum_driver_api()
+        .execute_transaction_block(
             transaction,
-            SuiTransactionResponseOptions::full_content(),
-            Some(sui_types::messages::ExecuteTransactionRequestType::WaitForLocalExecution),
+            SuiTransactionBlockResponseOptions::new()
+                .with_input()
+                .with_effects(),
+            Some(sui_types::quorum_driver_types::ExecuteTransactionRequestType::WaitForLocalExecution),
         )
         .await
         .map_err(|err| anyhow::anyhow!(err.to_string()))
@@ -585,12 +676,27 @@ impl Display for SuiValidatorCommandResponse {
             SuiValidatorCommandResponse::ReportValidator(response) => {
                 write!(writer, "{}", write_transaction_response(response)?)?;
             }
+            SuiValidatorCommandResponse::SerializedPayload(response) => {
+                write!(writer, "Serialized payload: {}", response)?;
+            }
+            SuiValidatorCommandResponse::DisplayGasPriceUpdateRawTxn {
+                data,
+                serialized_data,
+            } => {
+                write!(
+                    writer,
+                    "Transaction: {:?}, \nSerialized transaction: {:?}",
+                    data, serialized_data
+                )?;
+            }
         }
         write!(f, "{}", writer.trim_end_matches('\n'))
     }
 }
 
-pub fn write_transaction_response(response: &SuiTransactionResponse) -> Result<String, fmt::Error> {
+pub fn write_transaction_response(
+    response: &SuiTransactionBlockResponse,
+) -> Result<String, fmt::Error> {
     // we requested with for full_content, so the following content should be available.
     let success = response.status_ok().unwrap();
     let lines = vec![
@@ -647,7 +753,7 @@ pub enum ValidatorStatus {
     Pending,
 }
 
-async fn get_validator_summary(
+pub async fn get_validator_summary(
     client: &SuiClient,
     validator_address: SuiAddress,
 ) -> anyhow::Result<Option<(ValidatorStatus, SuiValidatorSummary)>> {
@@ -789,7 +895,7 @@ async fn update_metadata(
     context: &mut WalletContext,
     metadata: MetadataUpdate,
     gas_budget: u64,
-) -> anyhow::Result<SuiTransactionResponse> {
+) -> anyhow::Result<SuiTransactionBlockResponse> {
     use ValidatorStatus::*;
     match metadata {
         MetadataUpdate::Name { name } => {

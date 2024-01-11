@@ -1,66 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use axum::{
-    extract::Extension,
-    http::{header, StatusCode},
-    routing::get,
-    Router,
-};
-
+use axum::http::header;
 use mysten_network::metrics::MetricsCallbackProvider;
 use prometheus::{
-    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry, Encoder,
-    IntCounterVec, IntGaugeVec, Registry, TextEncoder, PROTOBUF_FORMAT,
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry, Encoder, HistogramVec, IntCounterVec, IntGaugeVec,
+    Registry, PROTOBUF_FORMAT,
 };
 
-use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sui_network::tonic::Code;
 
 use mysten_metrics::RegistryService;
-use tracing::warn;
-
-const METRICS_ROUTE: &str = "/metrics";
-
-// Creates a new http server that has as a sole purpose to expose
-// and endpoint that prometheus agent can use to poll for the metrics.
-// A RegistryService is returned that can be used to get access in prometheus Registries.
-pub fn start_prometheus_server(addr: SocketAddr) -> RegistryService {
-    let registry = Registry::new();
-
-    let registry_service = RegistryService::new(registry);
-
-    if cfg!(msim) {
-        // prometheus uses difficult-to-support features such as TcpSocket::from_raw_fd(), so we
-        // can't yet run it in the simulator.
-        warn!("not starting prometheus server in simulator");
-        return registry_service;
-    }
-
-    let app = Router::new()
-        .route(METRICS_ROUTE, get(metrics))
-        .layer(Extension(registry_service.clone()));
-
-    tokio::spawn(async move {
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
-    });
-
-    registry_service
-}
-
-async fn metrics(Extension(registry_service): Extension<RegistryService>) -> (StatusCode, String) {
-    let metrics_families = registry_service.gather_all();
-    match TextEncoder.encode_to_string(&metrics_families) {
-        Ok(metrics) => (StatusCode::OK, metrics),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("unable to encode metrics: {error}"),
-        ),
-    }
-}
+use tracing::error;
 
 pub struct MetricsPushClient {
     certificate: std::sync::Arc<sui_tls::SelfSignedCertificate>,
@@ -117,7 +69,9 @@ pub fn start_metrics_push_task(config: &sui_config::NodeConfig, registry: Regist
         _ => return,
     };
 
-    let client = MetricsPushClient::new(config.network_key_pair().copy());
+    // make a copy so we can make a new client later when we hit errors posting metrics
+    let config_copy = config.clone();
+    let mut client = MetricsPushClient::new(config_copy.network_key_pair().copy());
 
     async fn push_metrics(
         client: &MetricsPushClient,
@@ -141,11 +95,18 @@ pub fn start_metrics_push_task(config: &sui_config::NodeConfig, registry: Regist
         let encoder = prometheus::ProtobufEncoder::new();
         encoder.encode(&metric_families, &mut buf)?;
 
+        let mut s = snap::raw::Encoder::new();
+        let compressed = s.compress_vec(&buf).map_err(|err| {
+            error!("unable to snappy encode; {err}");
+            err
+        })?;
+
         let response = client
             .client()
             .post(url.to_owned())
+            .header(reqwest::header::CONTENT_ENCODING, "snappy")
             .header(header::CONTENT_TYPE, PROTOBUF_FORMAT)
-            .body(buf)
+            .body(compressed)
             .send()
             .await?;
 
@@ -177,17 +138,76 @@ pub fn start_metrics_push_task(config: &sui_config::NodeConfig, registry: Regist
             interval.tick().await;
 
             if let Err(error) = push_metrics(&client, &url, &registry).await {
-                tracing::warn!("unable to push metrics: {error}");
+                tracing::warn!("unable to push metrics: {error}; new client will be created");
+                // aggressively recreate our client connection if we hit an error
+                // since our tick interval is only every min, this should not be racey
+                client = MetricsPushClient::new(config_copy.network_key_pair().copy());
             }
         }
     });
+}
+
+pub struct SuiNodeMetrics {
+    pub jwk_requests: IntCounterVec,
+    pub jwk_request_errors: IntCounterVec,
+
+    pub total_jwks: IntCounterVec,
+    pub invalid_jwks: IntCounterVec,
+    pub unique_jwks: IntCounterVec,
+}
+
+impl SuiNodeMetrics {
+    pub fn new(registry: &Registry) -> Self {
+        Self {
+            jwk_requests: register_int_counter_vec_with_registry!(
+                "jwk_requests",
+                "Total number of JWK requests",
+                &["provider"],
+                registry,
+            )
+            .unwrap(),
+            jwk_request_errors: register_int_counter_vec_with_registry!(
+                "jwk_request_errors",
+                "Total number of JWK request errors",
+                &["provider"],
+                registry,
+            )
+            .unwrap(),
+            total_jwks: register_int_counter_vec_with_registry!(
+                "total_jwks",
+                "Total number of JWKs",
+                &["provider"],
+                registry,
+            )
+            .unwrap(),
+            invalid_jwks: register_int_counter_vec_with_registry!(
+                "invalid_jwks",
+                "Total number of invalid JWKs",
+                &["provider"],
+                registry,
+            )
+            .unwrap(),
+            unique_jwks: register_int_counter_vec_with_registry!(
+                "unique_jwks",
+                "Total number of unique JWKs",
+                &["provider"],
+                registry,
+            )
+            .unwrap(),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct GrpcMetrics {
     inflight_grpc: IntGaugeVec,
     grpc_requests: IntCounterVec,
+    grpc_request_latency: HistogramVec,
 }
+
+const LATENCY_SEC_BUCKETS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 20., 30., 60., 90.,
+];
 
 impl GrpcMetrics {
     pub fn new(registry: &Registry) -> Self {
@@ -202,7 +222,15 @@ impl GrpcMetrics {
             grpc_requests: register_int_counter_vec_with_registry!(
                 "grpc_requests",
                 "Total GRPC requests per route",
+                &["path", "status"],
+                registry,
+            )
+            .unwrap(),
+            grpc_request_latency: register_histogram_vec_with_registry!(
+                "grpc_request_latency",
+                "Latency of GRPC requests per route",
                 &["path"],
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
@@ -212,18 +240,18 @@ impl GrpcMetrics {
 
 impl MetricsCallbackProvider for GrpcMetrics {
     fn on_request(&self, _path: String) {}
-    fn on_response(
-        &self,
-        _path: String,
-        _latency: Duration,
-        _status: u16,
-        _grpc_status_code: Code,
-    ) {
+
+    fn on_response(&self, path: String, latency: Duration, _status: u16, grpc_status_code: Code) {
+        self.grpc_requests
+            .with_label_values(&[path.as_str(), format!("{grpc_status_code:?}").as_str()])
+            .inc();
+        self.grpc_request_latency
+            .with_label_values(&[path.as_str()])
+            .observe(latency.as_secs_f64());
     }
 
     fn on_start(&self, path: &str) {
         self.inflight_grpc.with_label_values(&[path]).inc();
-        self.grpc_requests.with_label_values(&[path]).inc();
     }
 
     fn on_drop(&self, path: &str) {
@@ -233,7 +261,7 @@ impl MetricsCallbackProvider for GrpcMetrics {
 
 #[cfg(test)]
 mod tests {
-    use crate::metrics::start_prometheus_server;
+    use mysten_metrics::start_prometheus_server;
     use prometheus::{IntCounter, Registry};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

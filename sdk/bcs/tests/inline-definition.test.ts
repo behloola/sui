@@ -1,54 +1,50 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "vitest";
-import { BCS, getSuiMoveConfig } from "../src/index";
+import { describe, expect, it } from 'vitest';
 
-describe("BCS: Inline struct definitions", () => {
-  it("should de/serialize inline definition", () => {
-    const bcs = new BCS(getSuiMoveConfig());
-    const value = {
-      t1: "Adam",
-      t2: "1000",
-      t3: ["aabbcc", "00aa00", "00aaffcc"],
-    };
+import { BCS, getSuiMoveConfig } from '../src/index';
+import { serde } from './utils';
 
-    expect(
-      serde(
-        bcs,
-        {
-          t1: "string",
-          t2: "u64",
-          t3: "vector<hex-string>",
-        },
-        value
-      )
-    ).toEqual(value);
-  });
+describe('BCS: Inline struct definitions', () => {
+	it('should de/serialize inline definition', () => {
+		const bcs = new BCS(getSuiMoveConfig());
+		const value = {
+			t1: 'Adam',
+			t2: '1000',
+			t3: ['aabbcc', '00aa00', '00aaffcc'],
+		};
 
-  it("should not contain a trace of the temp struct", () => {
-    const bcs = new BCS(getSuiMoveConfig());
-    const _sr = bcs
-      .ser({ name: "string", age: "u8" }, { name: "Charlie", age: 10 })
-      .toString("hex");
+		expect(
+			serde(
+				bcs,
+				{
+					t1: 'string',
+					t2: 'u64',
+					t3: 'vector<hex-string>',
+				},
+				value,
+			),
+		).toEqual(value);
+	});
 
-    expect(bcs.hasType("temp-struct")).toBe(false);
-  });
+	it('should not contain a trace of the temp struct', () => {
+		const bcs = new BCS(getSuiMoveConfig());
+		const _sr = bcs
+			.ser({ name: 'string', age: 'u8' }, { name: 'Charlie', age: 10 })
+			.toString('hex');
 
-  it("should avoid duplicate key", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.hasType('temp-struct')).toBe(false);
+	});
 
-    bcs.registerStructType("temp-struct", { a0: "u8" });
+	it('should avoid duplicate key', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    const sr = serde(bcs, { b0: "temp-struct" }, { b0: { a0: 0 } });
+		bcs.registerStructType('temp-struct', { a0: 'u8' });
 
-    expect(bcs.hasType("temp-struct")).toBe(true);
-    expect(sr).toEqual({ b0: { a0: 0 } });
-  });
+		const sr = serde(bcs, { b0: 'temp-struct' }, { b0: { a0: 0 } });
+
+		expect(bcs.hasType('temp-struct')).toBe(true);
+		expect(sr).toEqual({ b0: { a0: 0 } });
+	});
 });
-
-function serde(bcs, type, data) {
-  let ser = bcs.ser(type, data).toString("hex");
-  let de = bcs.de(type, ser, "hex");
-  return de;
-}

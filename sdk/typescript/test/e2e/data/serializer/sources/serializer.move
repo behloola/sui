@@ -12,7 +12,7 @@ module serializer::serializer_tests {
         value: u64,
     }
 
-     fun init(ctx: &mut TxContext) {
+    fun init(ctx: &mut TxContext) {
         transfer::share_object(MutableShared {
             id: object::new(ctx),
             value: 1,
@@ -40,6 +40,11 @@ module serializer::serializer_tests {
 
     public entry fun set_value(clock: &mut MutableShared) {
         clock.value = 10;
+    }
+
+    public entry fun delete_value(clock: MutableShared) {
+        let MutableShared { id, value: _ } = clock;
+        object::delete(id);
     }
 
     public fun test_abort() {

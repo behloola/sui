@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use sui_config::NodeConfig;
 use sui_node::{SuiNode, SuiNodeHandle};
+use sui_types::base_types::ConciseableName;
 use tokio::sync::watch;
 use tracing::{info, trace};
 
@@ -36,14 +37,13 @@ impl Drop for Container {
 impl Container {
     /// Spawn a new Node.
     pub async fn spawn(config: NodeConfig, _runtime: RuntimeType) -> Self {
-        let (startup_sender, mut startup_reciever) = tokio::sync::watch::channel(Weak::new());
-        let (cancel_sender, cancel_reciever) = tokio::sync::watch::channel(false);
+        let (startup_sender, mut startup_receiver) = tokio::sync::watch::channel(Weak::new());
+        let (cancel_sender, cancel_receiver) = tokio::sync::watch::channel(false);
 
         let handle = sui_simulator::runtime::Handle::current();
         let builder = handle.create_node();
 
-        let socket_addr =
-            mysten_network::multiaddr::to_socket_addr(&config.network_address).unwrap();
+        let socket_addr = config.network_address.to_socket_addr().unwrap();
         let ip = match socket_addr {
             SocketAddr::V4(v4) => IpAddr::V4(*v4.ip()),
             _ => panic!("unsupported protocol"),
@@ -57,17 +57,19 @@ impl Container {
             .init(move || {
                 info!("Node restarted");
                 let config = config.clone();
-                let mut cancel_reciever = cancel_reciever.clone();
+                let mut cancel_receiver = cancel_receiver.clone();
                 let startup_sender = startup_sender.clone();
                 async move {
                     let registry_service = mysten_metrics::RegistryService::new(Registry::new());
-                    let server = SuiNode::start(&config, registry_service).await.unwrap();
+                    let server = SuiNode::start(&config, registry_service, None)
+                        .await
+                        .unwrap();
 
                     startup_sender.send(Arc::downgrade(&server)).ok();
 
                     // run until canceled
                     loop {
-                        if cancel_reciever.changed().await.is_err() || *cancel_reciever.borrow() {
+                        if cancel_receiver.changed().await.is_err() || *cancel_receiver.borrow() {
                             break;
                         }
                     }
@@ -76,12 +78,12 @@ impl Container {
             })
             .build();
 
-        startup_reciever.changed().await.unwrap();
+        startup_receiver.changed().await.unwrap();
 
         Self {
             handle: Some(ContainerHandle { node_id: node.id() }),
             cancel_sender: Some(cancel_sender),
-            node_watch: startup_reciever,
+            node_watch: startup_receiver,
         }
     }
 

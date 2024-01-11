@@ -46,13 +46,15 @@ pub const TRANSFER_OBJECTS: &str = "TransferObjects";
 pub const SPLIT_COINS: &str = "SplitCoins";
 pub const MERGE_COINS: &str = "MergeCoins";
 pub const MAKE_MOVE_VEC: &str = "MakeMoveVec";
+pub const PUBLISH: &str = "Publish";
+pub const UPGRADE: &str = "Upgrade";
 pub const GAS_COIN: &str = "Gas";
 pub const INPUT: &str = "Input";
 pub const RESULT: &str = "Result";
 pub const NESTED_RESULT: &str = "NestedResult";
 
 impl Display for CommandToken {
-    fn fmt<'f>(&self, formatter: &mut fmt::Formatter<'f>) -> Result<(), fmt::Error> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         let s = match *self {
             CommandToken::Whitespace => "[whitespace]",
             CommandToken::Comment => "[comment]",

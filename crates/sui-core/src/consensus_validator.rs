@@ -5,20 +5,25 @@ use eyre::WrapErr;
 use mysten_metrics::monitored_scope;
 use prometheus::{register_int_counter_with_registry, IntCounter, Registry};
 use std::sync::Arc;
+use sui_protocol_config::ProtocolConfig;
 
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
+use crate::checkpoints::CheckpointServiceNotify;
 use crate::transaction_manager::TransactionManager;
 use async_trait::async_trait;
+use mysticeti_core::block_validator::BlockVerifier;
+use mysticeti_core::types::StatementBlock;
+use narwhal_types::{validate_batch_version, BatchAPI};
 use narwhal_worker::TransactionValidator;
-use sui_types::messages::{ConsensusTransaction, ConsensusTransactionKind};
+use sui_types::messages_consensus::{ConsensusTransaction, ConsensusTransactionKind};
 use tap::TapFallible;
-use tokio::runtime::Handle;
 use tracing::{info, warn};
 
 /// Allows verifying the validity of transactions
 #[derive(Clone)]
 pub struct SuiTxValidator {
     epoch_store: Arc<AuthorityPerEpochStore>,
+    checkpoint_service: Arc<dyn CheckpointServiceNotify + Send + Sync>,
     _transaction_manager: Arc<TransactionManager>,
     metrics: Arc<SuiTxValidatorMetrics>,
 }
@@ -26,6 +31,7 @@ pub struct SuiTxValidator {
 impl SuiTxValidator {
     pub fn new(
         epoch_store: Arc<AuthorityPerEpochStore>,
+        checkpoint_service: Arc<dyn CheckpointServiceNotify + Send + Sync>,
         transaction_manager: Arc<TransactionManager>,
         metrics: Arc<SuiTxValidatorMetrics>,
     ) -> Self {
@@ -35,9 +41,73 @@ impl SuiTxValidator {
         );
         Self {
             epoch_store,
+            checkpoint_service,
             _transaction_manager: transaction_manager,
             metrics,
         }
+    }
+
+    async fn validate_transactions(
+        &self,
+        txs: Vec<ConsensusTransactionKind>,
+    ) -> Result<(), eyre::Report> {
+        let mut cert_batch = Vec::new();
+        let mut ckpt_messages = Vec::new();
+        let mut ckpt_batch = Vec::new();
+        for tx in txs.into_iter() {
+            match tx {
+                ConsensusTransactionKind::UserTransaction(certificate) => {
+                    cert_batch.push(*certificate);
+
+                    // if !certificate.contains_shared_object() {
+                    //     // new_unchecked safety: we do not use the certs in this list until all
+                    //     // have had their signatures verified.
+                    //     owned_tx_certs.push(VerifiedCertificate::new_unchecked(*certificate));
+                    // }
+                }
+                ConsensusTransactionKind::CheckpointSignature(signature) => {
+                    ckpt_messages.push(signature.clone());
+                    ckpt_batch.push(signature.summary);
+                }
+                ConsensusTransactionKind::EndOfPublish(_)
+                | ConsensusTransactionKind::CapabilityNotification(_)
+                | ConsensusTransactionKind::NewJWKFetched(_, _, _)
+                | ConsensusTransactionKind::RandomnessStateUpdate(_, _) => {}
+            }
+        }
+
+        // verify the certificate signatures as a batch
+        let cert_count = cert_batch.len();
+        let ckpt_count = ckpt_batch.len();
+
+        self.epoch_store
+            .signature_verifier
+            .verify_certs_and_checkpoints(cert_batch, ckpt_batch)
+            .tap_err(|e| warn!("batch verification error: {}", e))
+            .wrap_err("Malformed batch (failed to verify)")?;
+
+        // All checkpoint sigs have been verified, forward them to the checkpoint service
+        for ckpt in ckpt_messages {
+            self.checkpoint_service
+                .notify_checkpoint_signature(&self.epoch_store, &ckpt)?;
+        }
+
+        self.metrics
+            .certificate_signatures_verified
+            .inc_by(cert_count as u64);
+        self.metrics
+            .checkpoint_signatures_verified
+            .inc_by(ckpt_count as u64);
+        Ok(())
+
+        // todo - we should un-comment line below once we have a way to revert those transactions at the end of epoch
+        // all certificates had valid signatures, schedule them for execution prior to sequencing
+        // which is unnecessary for owned object transactions.
+        // It is unnecessary to write to pending_certificates table because the certs will be written
+        // via Narwhal output.
+        // self.transaction_manager
+        //     .enqueue_certificates(owned_tx_certs, &self.epoch_store)
+        //     .wrap_err("Failed to schedule certificates for execution")
     }
 }
 
@@ -55,64 +125,38 @@ impl TransactionValidator for SuiTxValidator {
         Ok(())
     }
 
-    async fn validate_batch(&self, b: &narwhal_types::Batch) -> Result<(), Self::Error> {
+    async fn validate_batch(
+        &self,
+        b: &narwhal_types::Batch,
+        protocol_config: &ProtocolConfig,
+    ) -> Result<(), Self::Error> {
         let _scope = monitored_scope("ValidateBatch");
+
+        // TODO: Remove once we have removed BatchV1 from the codebase.
+        validate_batch_version(b, protocol_config)
+            .map_err(|err| eyre::eyre!(format!("Invalid Batch: {err}")))?;
+
         let txs = b
-            .transactions
+            .transactions()
             .iter()
-            .map(|tx| tx_from_bytes(tx))
+            .map(|tx| tx_from_bytes(tx).map(|tx| tx.kind))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut cert_batch = Vec::new();
-        let mut ckpt_batch = Vec::new();
-        for tx in txs.into_iter() {
-            match tx.kind {
-                ConsensusTransactionKind::UserTransaction(certificate) => {
-                    cert_batch.push(*certificate);
+        self.validate_transactions(txs).await
+    }
+}
 
-                    // if !certificate.contains_shared_object() {
-                    //     // new_unchecked safety: we do not use the certs in this list until all
-                    //     // have had their signatures verified.
-                    //     owned_tx_certs.push(VerifiedCertificate::new_unchecked(*certificate));
-                    // }
-                }
-                ConsensusTransactionKind::CheckpointSignature(signature) => {
-                    ckpt_batch.push(signature.summary)
-                }
-                ConsensusTransactionKind::EndOfPublish(_)
-                | ConsensusTransactionKind::CapabilityNotification(_) => {}
-            }
-        }
+#[async_trait]
+impl BlockVerifier for SuiTxValidator {
+    type Error = eyre::Report;
 
-        // verify the certificate signatures as a batch
-        let cert_count = cert_batch.len();
-        let ckpt_count = ckpt_batch.len();
-        let epoch_store = self.epoch_store.clone();
-        Handle::current()
-            .spawn_blocking(move || {
-                epoch_store
-                    .signature_verifier
-                    .verify_certs_and_checkpoints(cert_batch, ckpt_batch)
-                    .tap_err(|e| warn!("batch verification error: {}", e))
-                    .wrap_err("Malformed batch (failed to verify)")
-            })
-            .await??;
-        self.metrics
-            .certificate_signatures_verified
-            .inc_by(cert_count as u64);
-        self.metrics
-            .checkpoint_signatures_verified
-            .inc_by(ckpt_count as u64);
-        Ok(())
+    async fn verify(&self, b: &StatementBlock) -> Result<(), Self::Error> {
+        let txs = b
+            .shared_transactions()
+            .map(|(_locator, tx)| tx_from_bytes(tx.data()).map(|tx| tx.kind))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // todo - we should un-comment line below once we have a way to revert those transactions at the end of epoch
-        // all certificates had valid signatures, schedule them for execution prior to sequencing
-        // which is unnecessary for owned object transactions.
-        // It is unnecessary to write to pending_certificates table because the certs will be written
-        // via Narwhal output.
-        // self.transaction_manager
-        //     .enqueue_certificates(owned_tx_certs, &self.epoch_store)
-        //     .wrap_err("Failed to schedule certificates for execution")
+        self.validate_transactions(txs).await
     }
 }
 
@@ -143,20 +187,23 @@ impl SuiTxValidatorMetrics {
 #[cfg(test)]
 mod tests {
     use crate::{
-        authority::authority_tests::init_state_with_objects_and_committee,
+        checkpoints::CheckpointServiceNoop,
         consensus_adapter::consensus_tests::{test_certificates, test_gas_objects},
         consensus_validator::{SuiTxValidator, SuiTxValidatorMetrics},
     };
-    use fastcrypto::traits::KeyPair;
-    use narwhal_types::Batch;
-    use narwhal_worker::TransactionValidator;
-    use sui_types::{
-        base_types::AuthorityName, messages::ConsensusTransaction, signature::GenericSignature,
-    };
 
+    use narwhal_test_utils::latest_protocol_version;
+    use narwhal_types::{Batch, BatchV1};
+    use narwhal_worker::TransactionValidator;
+    use sui_types::signature::GenericSignature;
+
+    use crate::authority::test_authority_builder::TestAuthorityBuilder;
+    use std::sync::Arc;
     use sui_macros::sim_test;
     use sui_types::crypto::Ed25519SuiSignature;
+    use sui_types::messages_consensus::ConsensusTransaction;
     use sui_types::object::Object;
+
     #[sim_test]
     async fn accept_valid_transaction() {
         // Initialize an authority with a (owned) gas object and a shared object; then
@@ -164,18 +211,18 @@ mod tests {
         let mut objects = test_gas_objects();
         objects.push(Object::shared_for_testing());
 
-        let dir = tempfile::TempDir::new().unwrap();
-        let network_config = sui_config::builder::ConfigBuilder::new(&dir)
-            .with_objects(objects.clone())
-            .build();
-        let genesis = network_config.genesis;
+        let latest_protocol_config = &latest_protocol_version();
 
-        let sec1 = network_config.validator_configs[0]
-            .protocol_key_pair()
-            .copy();
-        let name1: AuthorityName = sec1.public().into();
+        let network_config =
+            sui_swarm_config::network_config_builder::ConfigBuilder::new_with_temp_dir()
+                .with_objects(objects.clone())
+                .build();
 
-        let state = init_state_with_objects_and_committee(objects, &genesis, &sec1).await;
+        let state = TestAuthorityBuilder::new()
+            .with_network_config(&network_config)
+            .build()
+            .await;
+        let name1 = state.name;
         let certificates = test_certificates(&state).await;
 
         let first_transaction = certificates[0].clone();
@@ -187,6 +234,7 @@ mod tests {
         let metrics = SuiTxValidatorMetrics::new(&Default::default());
         let validator = SuiTxValidator::new(
             state.epoch_store_for_testing().clone(),
+            Arc::new(CheckpointServiceNoop {}),
             state.transaction_manager().clone(),
             metrics,
         );
@@ -201,8 +249,10 @@ mod tests {
             })
             .collect();
 
-        let batch = Batch::new(transaction_bytes);
-        let res_batch = validator.validate_batch(&batch).await;
+        let batch = Batch::new(transaction_bytes, latest_protocol_config);
+        let res_batch = validator
+            .validate_batch(&batch, latest_protocol_config)
+            .await;
         assert!(res_batch.is_ok(), "{res_batch:?}");
 
         let bogus_transaction_bytes: Vec<_> = certificates
@@ -217,8 +267,27 @@ mod tests {
             })
             .collect();
 
-        let batch = Batch::new(bogus_transaction_bytes);
-        let res_batch = validator.validate_batch(&batch).await;
+        let batch = Batch::new(bogus_transaction_bytes, latest_protocol_config);
+        let res_batch = validator
+            .validate_batch(&batch, latest_protocol_config)
+            .await;
         assert!(res_batch.is_err());
+
+        // TODO: Remove once we have removed BatchV1 from the codebase.
+        let batch_v1 = Batch::V1(BatchV1::new(vec![]));
+
+        // Case #1: Receive BatchV1 but network has upgraded past v11 so we fail because we expect BatchV2
+        let res_batch = validator
+            .validate_batch(&batch_v1, latest_protocol_config)
+            .await;
+        assert!(res_batch.is_err());
+
+        let batch_v2 = Batch::new(vec![], latest_protocol_config);
+
+        // Case #2: Receive BatchV2 and network is upgraded past v11 so we are okay
+        let res_batch = validator
+            .validate_batch(&batch_v2, latest_protocol_config)
+            .await;
+        assert!(res_batch.is_ok());
     }
 }

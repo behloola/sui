@@ -11,6 +11,8 @@ module sui::object {
     friend sui::dynamic_field;
     friend sui::dynamic_object_field;
     friend sui::transfer;
+    friend sui::authenticator_state;
+    friend sui::random;
 
     #[test_only]
     friend sui::test_scenario;
@@ -20,6 +22,12 @@ module sui::object {
 
     /// The hardcoded ID for the singleton Clock Object.
     const SUI_CLOCK_OBJECT_ID: address = @0x6;
+
+    /// The hardcoded ID for the singleton AuthenticatorState Object.
+    const SUI_AUTHENTICATOR_STATE_ID: address = @0x7;
+
+    /// The hardcoded ID for the singleton Random Object.
+    const SUI_RANDOM_ID: address = @0x8;
 
     /// Sender is not @0x0 the system address.
     const ENotSystemAddress: u64 = 0;
@@ -72,6 +80,7 @@ module sui::object {
 
     // === uid ===
 
+    #[allow(unused_function)]
     /// Create the `UID` for the singleton `SuiSystemState` object.
     /// This should only be called once from `sui_system`.
     fun sui_system_state(ctx: &TxContext): UID {
@@ -86,6 +95,22 @@ module sui::object {
     public(friend) fun clock(): UID {
         UID {
             id: ID { bytes: SUI_CLOCK_OBJECT_ID }
+        }
+    }
+
+    /// Create the `UID` for the singleton `AuthenticatorState` object.
+    /// This should only be called once from `authenticator_state`.
+    public(friend) fun authenticator_state(): UID {
+        UID {
+            id: ID { bytes: SUI_AUTHENTICATOR_STATE_ID }
+        }
+    }
+
+    /// Create the `UID` for the singleton `Random` object.
+    /// This should only be called once from `random`.
+    public(friend) fun randomness_state(): UID {
+        UID {
+            id: ID { bytes: SUI_RANDOM_ID }
         }
     }
 
@@ -167,51 +192,8 @@ module sui::object {
     // helper for delete
     native fun delete_impl(id: address);
 
-    spec delete_impl {
-        pragma opaque;
-        aborts_if [abstract] false;
-        ensures [abstract] !exists<Ownership>(id);
-    }
-
     // marks newly created UIDs from hash
     native fun record_new_uid(id: address);
-
-    spec record_new_uid {
-        pragma opaque;
-        // TODO: stub to be replaced by actual abort conditions if any
-        aborts_if [abstract] true;
-        // TODO: specify actual function behavior
-     }
-
-    // Cost calibration functions
-    #[test_only]
-    public fun calibrate_address_from_bytes(bytes: vector<u8>) {
-        sui::address::from_bytes(bytes);
-    }
-
-    #[test_only]
-    public fun calibrate_address_from_bytes_nop(bytes: vector<u8>) {
-        let _ = bytes;
-    }
-
-    #[test_only]
-    public fun calibrate_borrow_uid<T: key>(obj: &T) {
-        borrow_uid(obj);
-    }
-    #[test_only]
-    public fun calibrate_borrow_uid_nop<T: key>(obj: &T) {
-        let _ = obj;
-    }
-
-    // TBD
-
-    // #[test_only]
-    // public fun calibrate_delete_impl(id: UID) {
-    //     delete_impl(id);
-    // }
-    // #[test_only]
-    // public fun calibrate_delete_impl(_id: UID) {
-    // }
 
     #[test_only]
     /// Return the most recent created object ID.
@@ -224,7 +206,7 @@ module sui::object {
 
     #[verify_only]
     /// Ownership information for a given object (stored at the object's address)
-    struct Ownership has key {
+    struct Ownership {
         owner: address, // only matters if status == OWNED
         status: u64,
     }
@@ -232,7 +214,7 @@ module sui::object {
     #[verify_only]
     /// List of fields with a given name type of an object containing fields (stored at the
     /// containing object's address)
-    struct DynamicFields<K: copy + drop + store> has key {
+    struct DynamicFields<K: copy + drop + store> {
         names: vector<K>,
     }
 

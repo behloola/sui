@@ -3,15 +3,19 @@
 
 use crate::metrics::new_registry;
 use crate::{try_join_all, FuturesUnordered, NodeError};
+use anemo::PeerId;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use config::{Committee, Parameters, WorkerCache, WorkerId};
 use crypto::{NetworkKeyPair, PublicKey};
+use fastcrypto::traits::KeyPair;
 use mysten_metrics::{RegistryID, RegistryService};
+use network::client::NetworkClient;
 use prometheus::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use storage::NodeStorage;
+use sui_protocol_config::ProtocolConfig;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument};
@@ -22,6 +26,7 @@ use worker::{TransactionValidator, Worker, NUM_SHUTDOWN_RECEIVERS};
 pub struct WorkerNodeInner {
     // The worker's id
     id: WorkerId,
+    protocol_config: ProtocolConfig,
     // The configuration parameters.
     parameters: Parameters,
     // A prometheus RegistryService to use for the metrics
@@ -32,6 +37,8 @@ pub struct WorkerNodeInner {
     handles: FuturesUnordered<JoinHandle<()>>,
     // The shutdown signal channel
     tx_shutdown: Option<PreSubscribedBroadcastSender>,
+    // Peer ID used for local connections.
+    own_peer_id: Option<PeerId>,
 }
 
 impl WorkerNodeInner {
@@ -48,7 +55,10 @@ impl WorkerNodeInner {
         committee: Committee,
         // The worker information cache.
         worker_cache: WorkerCache,
-        // The node's store //TODO: replace this by a path so the method can open and independent storage
+        // Client for communications.
+        client: NetworkClient,
+        // The node's store
+        // TODO: replace this by a path so the method can open and independent storage
         store: &NodeStorage,
         // The transaction validator that should be used
         tx_validator: impl TransactionValidator,
@@ -59,6 +69,8 @@ impl WorkerNodeInner {
         if self.is_running().await {
             return Err(NodeError::NodeAlreadyRunning);
         }
+
+        self.own_peer_id = Some(PeerId(network_keypair.public().0.to_bytes()));
 
         let (metrics, registry) = if let Some(metrics) = metrics {
             (metrics, None)
@@ -86,8 +98,10 @@ impl WorkerNodeInner {
             self.id,
             committee.clone(),
             worker_cache.clone(),
+            self.protocol_config.clone(),
             self.parameters.clone(),
             tx_validator.clone(),
+            client.clone(),
             store.batch_store.clone(),
             metrics,
             &mut tx_shutdown,
@@ -171,16 +185,19 @@ pub struct WorkerNode {
 impl WorkerNode {
     pub fn new(
         id: WorkerId,
+        protocol_config: ProtocolConfig,
         parameters: Parameters,
         registry_service: RegistryService,
     ) -> WorkerNode {
         let inner = WorkerNodeInner {
             id,
+            protocol_config,
             parameters,
             registry_service,
             registry: None,
             handles: FuturesUnordered::new(),
             tx_shutdown: None,
+            own_peer_id: None,
         };
 
         Self {
@@ -198,7 +215,10 @@ impl WorkerNode {
         committee: Committee,
         // The worker information cache.
         worker_cache: WorkerCache,
-        // The node's store //TODO: replace this by a path so the method can open and independent storage
+        // Client for communications.
+        client: NetworkClient,
+        // The node's store
+        // TODO: replace this by a path so the method can open and independent storage
         store: &NodeStorage,
         // The transaction validator defining Tx acceptance,
         tx_validator: impl TransactionValidator,
@@ -212,6 +232,7 @@ impl WorkerNode {
                 network_keypair,
                 committee,
                 worker_cache,
+                client,
                 store,
                 tx_validator,
                 metrics,
@@ -240,6 +261,7 @@ pub struct WorkerNodes {
     registry_service: RegistryService,
     registry_id: ArcSwapOption<RegistryID>,
     parameters: Parameters,
+    client: ArcSwapOption<NetworkClient>,
 }
 
 impl WorkerNodes {
@@ -249,6 +271,7 @@ impl WorkerNodes {
             registry_service,
             registry_id: ArcSwapOption::empty(),
             parameters,
+            client: ArcSwapOption::empty(),
         }
     }
 
@@ -261,9 +284,13 @@ impl WorkerNodes {
         ids_and_keypairs: Vec<(WorkerId, NetworkKeyPair)>,
         // The committee information.
         committee: Committee,
+        protocol_config: ProtocolConfig,
         // The worker information cache.
         worker_cache: WorkerCache,
-        // The node's store //TODO: replace this by a path so the method can open and independent storage
+        // Client for communications.
+        client: NetworkClient,
+        // The node's store
+        // TODO: replace this by a path so the method can open and independent storage
         store: &NodeStorage,
         // The transaction validator defining Tx acceptance,
         tx_validator: impl TransactionValidator,
@@ -278,6 +305,8 @@ impl WorkerNodes {
 
         let metrics = initialise_metrics(&registry);
 
+        self.client.store(Some(Arc::new(client.clone())));
+
         // now clear the previous handles - we want to do that proactively
         // as it's not guaranteed that shutdown has been called
         self.workers.store(Arc::new(HashMap::default()));
@@ -287,6 +316,7 @@ impl WorkerNodes {
         for (worker_id, key_pair) in ids_and_keypairs {
             let worker = WorkerNode::new(
                 worker_id,
+                protocol_config.clone(),
                 self.parameters.clone(),
                 self.registry_service.clone(),
             );
@@ -297,6 +327,7 @@ impl WorkerNodes {
                     key_pair,
                     committee.clone(),
                     worker_cache.clone(),
+                    client.clone(),
                     store,
                     tx_validator.clone(),
                     Some(metrics.clone()),
@@ -323,6 +354,10 @@ impl WorkerNodes {
     // Shuts down all the workers
     #[instrument(level = "info", skip_all)]
     pub async fn shutdown(&self) {
+        if let Some(client) = self.client.load_full() {
+            client.shutdown();
+        }
+
         for (key, worker) in self.workers.load_full().as_ref() {
             info!("Shutting down worker {}", key);
             worker.shutdown().await;

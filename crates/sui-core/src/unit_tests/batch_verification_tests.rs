@@ -12,11 +12,12 @@ use sui_macros::sim_test;
 use sui_types::committee::Committee;
 use sui_types::crypto::{get_key_pair, AccountKeyPair, AuthorityKeyPair};
 use sui_types::gas::GasCostSummary;
-use sui_types::messages::CertifiedTransaction;
 use sui_types::messages_checkpoint::{
     CheckpointContents, CheckpointSummary, SignedCheckpointSummary,
 };
+use sui_types::transaction::CertifiedTransaction;
 
+// TODO consolidate with `gen_certs` in batch_verification_bench.rs
 fn gen_certs(
     committee: &Committee,
     key_pairs: &[AuthorityKeyPair],
@@ -25,7 +26,6 @@ fn gen_certs(
     let (receiver, _): (_, AccountKeyPair) = get_key_pair();
 
     let senders: Vec<_> = (0..count)
-        .into_iter()
         .map(|_| get_key_pair::<AccountKeyPair>())
         .collect();
 
@@ -45,7 +45,6 @@ fn gen_ckpts(
     count: usize,
 ) -> Vec<SignedCheckpointSummary> {
     (0..count)
-        .into_iter()
         .map(|i| {
             let k = &key_pairs[i % key_pairs.len()];
             let name = k.public().into();
@@ -58,7 +57,7 @@ fn gen_ckpts(
                     // AuthoritySignInfos are interchangeable).
                     i as u64,
                     0,
-                    &CheckpointContents::new_with_causally_ordered_transactions(vec![]),
+                    &CheckpointContents::new_with_digests_only_for_tests(vec![]),
                     None,
                     GasCostSummary::default(),
                     None,
@@ -107,16 +106,24 @@ async fn test_batch_verify() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_async_verifier() {
+    use fastcrypto_zkp::bn254::zk_login_api::ZkLoginEnv;
+
     let (committee, key_pairs) = Committee::new_simple_test_committee();
     let committee = Arc::new(committee);
     let key_pairs = Arc::new(key_pairs);
 
     let registry = Registry::new();
-    let metrics = VerifiedDigestCacheMetrics::new(&registry);
-    let verifier = Arc::new(SignatureVerifier::new(committee.clone(), metrics));
+    let metrics = SignatureVerifierMetrics::new(&registry);
+    let verifier = Arc::new(SignatureVerifier::new(
+        committee.clone(),
+        metrics,
+        vec![],
+        ZkLoginEnv::Test,
+        true,
+        true,
+    ));
 
     let tasks: Vec<_> = (0..32)
-        .into_iter()
         .map(|_| {
             let verifier = verifier.clone();
             let committee = committee.clone();

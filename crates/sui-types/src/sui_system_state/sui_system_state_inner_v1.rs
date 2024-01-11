@@ -7,8 +7,10 @@ use crate::collection_types::{Bag, Table, TableVec, VecMap, VecSet};
 use crate::committee::{Committee, CommitteeWithNetworkMetadata, NetworkMetadata};
 use crate::crypto::verify_proof_of_possession;
 use crate::crypto::AuthorityPublicKeyBytes;
+use crate::error::SuiError;
 use crate::id::ID;
 use crate::multiaddr::Multiaddr;
+use crate::storage::ObjectStore;
 use crate::sui_system_state::epoch_start_sui_system_state::EpochStartSystemState;
 use anyhow::Result;
 use fastcrypto::traits::ToFromBytes;
@@ -18,7 +20,7 @@ use std::collections::BTreeMap;
 
 use super::epoch_start_sui_system_state::EpochStartValidatorInfoV1;
 use super::sui_system_state_summary::{SuiSystemStateSummary, SuiValidatorSummary};
-use super::SuiSystemStateTrait;
+use super::{get_validators_from_table_vec, AdvanceEpochParams, SuiSystemStateTrait};
 
 const E_METADATA_INVALID_POP: u64 = 0;
 const E_METADATA_INVALID_PUBKEY: u64 = 1;
@@ -455,7 +457,6 @@ pub struct StorageFundV1 {
 }
 
 /// Rust version of the Move sui_system::sui_system::SuiSystemStateInner type
-/// We want to keep it named as SuiSystemState in Rust since this is the primary interface type.
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 pub struct SuiSystemStateInnerV1 {
     pub epoch: u64,
@@ -528,6 +529,19 @@ impl SuiSystemStateTrait for SuiSystemStateInnerV1 {
         self.safe_mode
     }
 
+    fn advance_epoch_safe_mode(&mut self, params: &AdvanceEpochParams) {
+        self.epoch = params.epoch;
+        self.safe_mode = true;
+        self.safe_mode_storage_rewards
+            .deposit_for_safe_mode(params.storage_charge);
+        self.safe_mode_storage_rebates += params.storage_rebate;
+        self.safe_mode_computation_rewards
+            .deposit_for_safe_mode(params.computation_charge);
+        self.safe_mode_non_refundable_storage_fee += params.non_refundable_storage_fee;
+        self.epoch_start_timestamp_ms = params.epoch_start_timestamp_ms;
+        self.protocol_version = params.next_protocol_version.as_u64();
+    }
+
     fn get_current_epoch_committee(&self) -> CommitteeWithNetworkMetadata {
         let mut voting_rights = BTreeMap::new();
         let mut network_metadata = BTreeMap::new();
@@ -547,6 +561,20 @@ impl SuiSystemStateTrait for SuiSystemStateInnerV1 {
             committee: Committee::new(self.epoch, voting_rights),
             network_metadata,
         }
+    }
+
+    fn get_pending_active_validators<S: ObjectStore>(
+        &self,
+        object_store: &S,
+    ) -> Result<Vec<SuiValidatorSummary>, SuiError> {
+        let table_id = self.validators.pending_active_validators.contents.id;
+        let table_size = self.validators.pending_active_validators.contents.size;
+        let validators: Vec<ValidatorV1> =
+            get_validators_from_table_vec(object_store, table_id, table_size)?;
+        Ok(validators
+            .into_iter()
+            .map(|v| v.into_sui_validator_summary())
+            .collect())
     }
 
     fn into_epoch_start_state(self) -> EpochStartSystemState {

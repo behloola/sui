@@ -1,34 +1,83 @@
 ---
+Authority:
+  STRUCT:
+    - protocol_key:
+        TUPLEARRAY:
+          CONTENT: U8
+          SIZE: 96
+    - protocol_key_bytes:
+        TUPLEARRAY:
+          CONTENT: U8
+          SIZE: 96
+    - stake: U64
+    - primary_address: STR
+    - network_key:
+        TUPLEARRAY:
+          CONTENT: U8
+          SIZE: 32
+    - hostname: STR
 AuthorityIdentifier:
   NEWTYPESTRUCT: U16
 Batch:
+  ENUM:
+    0:
+      V1:
+        NEWTYPE:
+          TYPENAME: BatchV1
+    1:
+      V2:
+        NEWTYPE:
+          TYPENAME: BatchV2
+BatchDigest:
+  NEWTYPESTRUCT:
+    TUPLEARRAY:
+      CONTENT: U8
+      SIZE: 32
+BatchV1:
   STRUCT:
     - transactions:
         SEQ:
           SEQ: U8
     - metadata:
         TYPENAME: Metadata
-BatchDigest:
-  NEWTYPESTRUCT:
-    TUPLEARRAY:
-      CONTENT: U8
-      SIZE: 32
-Certificate:
+BatchV2:
   STRUCT:
-    - header:
-        TYPENAME: Header
-    - aggregated_signature:
-        TUPLEARRAY:
-          CONTENT: U8
-          SIZE: 48
-    - signed_authorities: BYTES
-    - metadata:
-        TYPENAME: Metadata
+    - transactions:
+        SEQ:
+          SEQ: U8
+    - versioned_metadata:
+        TYPENAME: VersionedMetadata
+Certificate:
+  ENUM:
+    1:
+      V2:
+        NEWTYPE:
+          TYPENAME: CertificateV2
 CertificateDigest:
   NEWTYPESTRUCT:
     TUPLEARRAY:
       CONTENT: U8
       SIZE: 32
+CertificateV2:
+  STRUCT:
+    - header:
+        TYPENAME: Header
+    - signature_verification_state:
+        TYPENAME: SignatureVerificationState
+    - signed_authorities: BYTES
+    - metadata:
+        TYPENAME: Metadata
+Committee:
+  STRUCT:
+    - authorities:
+        MAP:
+          KEY:
+            TUPLEARRAY:
+              CONTENT: U8
+              SIZE: 96
+          VALUE:
+            TYPENAME: Authority
+    - epoch: U64
 Header:
   ENUM:
     0:
@@ -60,6 +109,25 @@ HeaderV1:
 Metadata:
   STRUCT:
     - created_at: U64
+MetadataV1:
+  STRUCT:
+    - created_at: U64
+    - received_at:
+        OPTION: U64
+SignatureVerificationState:
+  ENUM:
+    0:
+      Unsigned:
+        NEWTYPE:
+          TUPLEARRAY:
+            CONTENT: U8
+            SIZE: 48
+VersionedMetadata:
+  ENUM:
+    0:
+      V1:
+        NEWTYPE:
+          TYPENAME: MetadataV1
 WorkerIndex:
   NEWTYPESTRUCT:
     MAP:
@@ -79,13 +147,13 @@ WorkerOthersBatchMessage:
     - digest:
         TYPENAME: BatchDigest
     - worker_id: U32
-WorkerOurBatchMessage:
+WorkerOwnBatchMessage:
   STRUCT:
     - digest:
         TYPENAME: BatchDigest
     - worker_id: U32
     - metadata:
-        TYPENAME: Metadata
+        TYPENAME: VersionedMetadata
 WorkerSynchronizeMessage:
   STRUCT:
     - digests:

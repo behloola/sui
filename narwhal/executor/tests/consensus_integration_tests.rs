@@ -1,19 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use bytes::Bytes;
-use consensus::bullshark::Bullshark;
-use consensus::consensus::ConsensusRound;
-use consensus::metrics::ConsensusMetrics;
-use consensus::Consensus;
 use fastcrypto::hash::Hash;
 use narwhal_executor::get_restored_consensus_output;
 use narwhal_executor::MockExecutionState;
+use primary::consensus::{
+    Bullshark, Consensus, ConsensusMetrics, ConsensusRound, LeaderSchedule, LeaderSwapTable,
+};
 use primary::NUM_SHUTDOWN_RECEIVERS;
 use prometheus::Registry;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use storage::NodeStorage;
 use telemetry_subscribers::TelemetryGuards;
+use test_utils::latest_protocol_version;
 use test_utils::{cluster::Cluster, temp_dir, CommitteeFixture};
 use tokio::sync::watch;
 
@@ -33,18 +33,34 @@ async fn test_recovery() {
 
     // Make certificates for rounds 1 and 2.
     let ids: Vec<_> = fixture.authorities().map(|a| a.id()).collect();
-    let genesis = Certificate::genesis(&committee)
+    let genesis = Certificate::genesis(&latest_protocol_version(), &committee)
         .iter()
         .map(|x| x.digest())
         .collect::<BTreeSet<_>>();
-    let (mut certificates, next_parents) =
-        test_utils::make_optimal_certificates(&committee, 1..=2, &genesis, &ids);
+    let (mut certificates, next_parents) = test_utils::make_optimal_certificates(
+        &committee,
+        &latest_protocol_version(),
+        1..=2,
+        &genesis,
+        &ids,
+    );
 
     // Make two certificate (f+1) with round 3 to trigger the commits.
-    let (_, certificate) =
-        test_utils::mock_certificate(&committee, ids[0], 3, next_parents.clone());
+    let (_, certificate) = test_utils::mock_certificate(
+        &committee,
+        &latest_protocol_version(),
+        ids[0],
+        3,
+        next_parents.clone(),
+    );
     certificates.push_back(certificate);
-    let (_, certificate) = test_utils::mock_certificate(&committee, ids[1], 3, next_parents);
+    let (_, certificate) = test_utils::mock_certificate(
+        &committee,
+        &latest_protocol_version(),
+        ids[1],
+        3,
+        next_parents,
+    );
     certificates.push_back(certificate);
 
     // Spawn the consensus engine and sink the primary channel.
@@ -62,8 +78,10 @@ async fn test_recovery() {
     let bullshark = Bullshark::new(
         committee.clone(),
         consensus_store.clone(),
+        latest_protocol_version(),
         metrics.clone(),
         NUM_SUB_DAGS_PER_SCHEDULE,
+        LeaderSchedule::new(committee.clone(), LeaderSwapTable::default()),
     );
 
     let _consensus_handle = Consensus::spawn(
@@ -141,7 +159,7 @@ async fn test_internal_consensus_output() {
     // nodes logs.
     let _guard = setup_tracing();
 
-    let mut cluster = Cluster::new(None, true);
+    let mut cluster = Cluster::new(None);
 
     // start the cluster
     cluster.start(Some(4), Some(1), None).await;

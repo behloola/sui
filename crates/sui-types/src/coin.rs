@@ -1,33 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use move_core_types::{
-    ident_str,
-    identifier::IdentStr,
-    language_storage::{StructTag, TypeTag},
-    value::{MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
-};
-use serde::{Deserialize, Serialize};
-
-use crate::object::{MoveObject, Owner};
-use crate::storage::WriteKind;
-use crate::temporary_store::TemporaryStore;
+use crate::error::ExecutionErrorKind;
+use crate::error::SuiError;
 use crate::{
     balance::{Balance, Supply},
     error::ExecutionError,
     object::{Data, Object},
 };
-use crate::{base_types::TransactionDigest, error::SuiError};
-use crate::{
-    base_types::{MoveObjectType, SequenceNumber},
-    error::ExecutionErrorKind,
-};
-use crate::{
-    base_types::{ObjectID, SuiAddress},
-    id::UID,
-    SUI_FRAMEWORK_ADDRESS,
+use crate::{base_types::ObjectID, id::UID, SUI_FRAMEWORK_ADDRESS};
+use move_core_types::{
+    annotated_value::{MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
+    ident_str,
+    identifier::IdentStr,
+    language_storage::{StructTag, TypeTag},
 };
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub const COIN_MODULE_NAME: &IdentStr = ident_str!("coin");
 pub const COIN_STRUCT_NAME: &IdentStr = ident_str!("Coin");
@@ -105,7 +94,7 @@ impl Coin {
     }
 
     pub fn layout(type_param: TypeTag) -> MoveStructLayout {
-        MoveStructLayout::WithTypes {
+        MoveStructLayout {
             type_: Self::type_(type_param.clone()),
             fields: vec![
                 MoveFieldLayout::new(
@@ -122,8 +111,7 @@ impl Coin {
 
     /// Add balance to this coin, erroring if the new total balance exceeds the maximum
     pub fn add(&mut self, balance: Balance) -> Result<(), ExecutionError> {
-        let Some(new_value) = self.value().checked_add(balance.value())
-        else {
+        let Some(new_value) = self.value().checked_add(balance.value()) else {
             return Err(ExecutionError::from_kind(
                 ExecutionErrorKind::CoinBalanceOverflow,
             ));
@@ -149,10 +137,16 @@ pub struct TreasuryCap {
 }
 
 impl TreasuryCap {
+    pub fn is_treasury_type(other: &StructTag) -> bool {
+        other.address == SUI_FRAMEWORK_ADDRESS
+            && other.module.as_ident_str() == COIN_MODULE_NAME
+            && other.name.as_ident_str() == COIN_TREASURE_CAP_NAME
+    }
+
     /// Create a TreasuryCap from BCS bytes
     pub fn from_bcs_bytes(content: &[u8]) -> Result<Self, SuiError> {
-        bcs::from_bytes(content).map_err(|err| SuiError::TypeError {
-            error: format!("Unable to deserialize TreasuryCap object: {:?}", err),
+        bcs::from_bytes(content).map_err(|err| SuiError::ObjectDeserializationError {
+            error: format!("Unable to deserialize TreasuryCap object: {}", err),
         })
     }
 
@@ -166,19 +160,22 @@ impl TreasuryCap {
     }
 }
 
-pub fn transfer_coin<S>(
-    temporary_store: &mut TemporaryStore<S>,
-    coin: &Coin,
-    recipient: SuiAddress,
-    coin_type: MoveObjectType,
-    previous_transaction: TransactionDigest,
-) {
-    let new_coin = Object::new_move(
-        MoveObject::new_coin(coin_type, SequenceNumber::new(), *coin.id(), coin.value()),
-        Owner::AddressOwner(recipient),
-        previous_transaction,
-    );
-    temporary_store.write_object(new_coin, WriteKind::Create);
+impl TryFrom<Object> for TreasuryCap {
+    type Error = SuiError;
+    fn try_from(object: Object) -> Result<Self, Self::Error> {
+        match &object.data {
+            Data::Move(o) => {
+                if o.type_().is_treasury_cap() {
+                    return TreasuryCap::from_bcs_bytes(o.contents());
+                }
+            }
+            Data::Package(_) => {}
+        }
+
+        Err(SuiError::TypeError {
+            error: format!("Object type is not a TreasuryCap: {:?}", object),
+        })
+    }
 }
 
 // Rust version of the Move sui::coin::CoinMetadata type
@@ -207,8 +204,8 @@ impl CoinMetadata {
 
     /// Create a coin from BCS bytes
     pub fn from_bcs_bytes(content: &[u8]) -> Result<Self, SuiError> {
-        bcs::from_bytes(content).map_err(|err| SuiError::TypeError {
-            error: format!("Unable to deserialize CoinMetadata object: {:?}", err),
+        bcs::from_bytes(content).map_err(|err| SuiError::ObjectDeserializationError {
+            error: format!("Unable to deserialize CoinMetadata object: {}", err),
         })
     }
 

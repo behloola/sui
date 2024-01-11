@@ -1,21 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use fastcrypto::encoding::Base58;
-use move_bytecode_utils::module_cache::GetModule;
+use fastcrypto::encoding::{Base58, Base64};
+use move_core_types::annotated_value::MoveStructLayout;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::StructTag;
+use mysten_metrics::monitored_scope;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use serde_with::serde_as;
-use serde_with::DisplayFromStr;
-
+use serde_json::{json, Value};
+use serde_with::{serde_as, DisplayFromStr};
+use std::fmt;
+use std::fmt::Display;
 use sui_types::base_types::{ObjectID, SuiAddress, TransactionDigest};
 use sui_types::error::SuiResult;
 use sui_types::event::{Event, EventEnvelope, EventID};
+use sui_types::sui_serde::BigInt;
+
+use json_to_table::json_to_table;
+use tabled::settings::Style as TableStyle;
 
 use crate::{type_and_fields_from_move_struct, Page};
+use sui_types::sui_serde::SuiStructTag;
+
+#[cfg(any(feature = "test-utils", test))]
+use std::str::FromStr;
 
 pub type EventPage = Page<SuiEvent, EventID>;
 
@@ -38,7 +47,7 @@ pub struct SuiEvent {
     /// Sender's Sui address.
     pub sender: SuiAddress,
     #[schemars(with = "String")]
-    #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "SuiStructTag")]
     /// Move event type.
     pub type_: StructTag,
     /// Parsed json value of the event
@@ -49,6 +58,8 @@ pub struct SuiEvent {
     pub bcs: Vec<u8>,
     /// UTC timestamp in milliseconds since epoch (1/1/1970)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<BigInt<u64>>")]
+    #[serde_as(as = "Option<BigInt<u64>>")]
     pub timestamp_ms: Option<u64>,
 }
 
@@ -70,13 +81,25 @@ impl From<EventEnvelope> for SuiEvent {
     }
 }
 
+impl From<SuiEvent> for Event {
+    fn from(val: SuiEvent) -> Self {
+        Event {
+            package_id: val.package_id,
+            transaction_module: val.transaction_module,
+            sender: val.sender,
+            type_: val.type_,
+            contents: val.bcs,
+        }
+    }
+}
+
 impl SuiEvent {
     pub fn try_from(
         event: Event,
         tx_digest: TransactionDigest,
         event_seq: u64,
         timestamp_ms: Option<u64>,
-        resolver: &impl GetModule,
+        layout: MoveStructLayout,
     ) -> SuiResult<Self> {
         let Event {
             package_id,
@@ -88,7 +111,7 @@ impl SuiEvent {
 
         let bcs = contents.to_vec();
 
-        let move_struct = Event::move_event_to_move_struct(&type_, &contents, resolver)?;
+        let move_struct = Event::move_event_to_move_struct(&contents, layout)?;
         let (type_, field) = type_and_fields_from_move_struct(&type_, move_struct);
 
         Ok(SuiEvent {
@@ -107,6 +130,76 @@ impl SuiEvent {
     }
 }
 
+impl Display for SuiEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parsed_json = &mut self.parsed_json.clone();
+        bytes_array_to_base64(parsed_json);
+        let mut table = json_to_table(parsed_json);
+        let style = TableStyle::modern();
+        table.collapse().with(style);
+        write!(f,
+            " ┌──\n │ EventID: {}:{}\n │ PackageID: {}\n │ Transaction Module: {}\n │ Sender: {}\n │ EventType: {}\n",
+            self.id.tx_digest, self.id.event_seq, self.package_id, self.transaction_module, self.sender, self.type_)?;
+        if let Some(ts) = self.timestamp_ms {
+            writeln!(f, " │ Timestamp: {}\n └──", ts)?;
+        }
+        writeln!(f, " │ ParsedJSON:")?;
+        let table_string = table.to_string();
+        let table_rows = table_string.split_inclusive('\n');
+        for r in table_rows {
+            write!(f, " │   {r}")?;
+        }
+
+        write!(f, "\n └──")
+    }
+}
+
+#[cfg(any(feature = "test-utils", test))]
+impl SuiEvent {
+    pub fn random_for_testing() -> Self {
+        Self {
+            id: EventID {
+                tx_digest: TransactionDigest::random(),
+                event_seq: 0,
+            },
+            package_id: ObjectID::random(),
+            transaction_module: Identifier::from_str("random_for_testing").unwrap(),
+            sender: SuiAddress::random_for_testing_only(),
+            type_: StructTag::from_str("0x6666::random_for_testing::RandomForTesting").unwrap(),
+            parsed_json: json!({}),
+            bcs: vec![],
+            timestamp_ms: None,
+        }
+    }
+}
+
+/// Convert a json array of bytes to Base64
+fn bytes_array_to_base64(v: &mut Value) {
+    match v {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => (),
+        Value::Array(vals) => {
+            if let Some(vals) = vals.iter().map(try_into_byte).collect::<Option<Vec<_>>>() {
+                *v = json!(Base64::from_bytes(&vals).encoded())
+            } else {
+                for val in vals {
+                    bytes_array_to_base64(val)
+                }
+            }
+        }
+        Value::Object(map) => {
+            for val in map.values_mut() {
+                bytes_array_to_base64(val)
+            }
+        }
+    }
+}
+
+/// Try to convert a json Value object into an u8.
+fn try_into_byte(v: &Value) -> Option<u8> {
+    let num = v.as_u64()?;
+    (num <= 255).then_some(num as u8)
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub enum EventFilter {
@@ -120,6 +213,9 @@ pub enum EventFilter {
     /// Return events emitted in a specified Package.
     Package(ObjectID),
     /// Return events emitted in a specified Move module.
+    /// If the event is defined in Module A but emitted in a tx with Module B,
+    /// query `MoveModule` by module B returns the event.
+    /// Query `MoveEventModule` by module A returns the event too.
     MoveModule {
         /// the Move package ID
         package: ObjectID,
@@ -128,12 +224,26 @@ pub enum EventFilter {
         #[serde_as(as = "DisplayFromStr")]
         module: Identifier,
     },
-    /// Return events with the given move event struct name
+    /// Return events with the given Move event struct name (struct tag).
+    /// For example, if the event is defined in `0xabcd::MyModule`, and named
+    /// `Foo`, then the struct tag is `0xabcd::MyModule::Foo`.
     MoveEventType(
         #[schemars(with = "String")]
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde_as(as = "SuiStructTag")]
         StructTag,
     ),
+    /// Return events with the given Move module name where the event struct is defined.
+    /// If the event is defined in Module A but emitted in a tx with Module B,
+    /// query `MoveEventModule` by module A returns the event.
+    /// Query `MoveModule` by module B returns the event too.
+    MoveEventModule {
+        /// the Move package ID
+        package: ObjectID,
+        /// the module name
+        #[schemars(with = "String")]
+        #[serde_as(as = "DisplayFromStr")]
+        module: Identifier,
+    },
     MoveEventField {
         path: String,
         value: Value,
@@ -142,8 +252,12 @@ pub enum EventFilter {
     #[serde(rename_all = "camelCase")]
     TimeRange {
         /// left endpoint of time interval, milliseconds since epoch, inclusive
+        #[schemars(with = "BigInt<u64>")]
+        #[serde_as(as = "BigInt<u64>")]
         start_time: u64,
         /// right endpoint of time interval, milliseconds since epoch, exclusive
+        #[schemars(with = "BigInt<u64>")]
+        #[serde_as(as = "BigInt<u64>")]
         end_time: u64,
     },
 
@@ -185,6 +299,9 @@ impl EventFilter {
                     false
                 }
             }
+            EventFilter::MoveEventModule { package, module } => {
+                &item.type_.module == module && &ObjectID::from(item.type_.address) == package
+            }
         })
     }
 
@@ -198,6 +315,7 @@ impl EventFilter {
 
 impl Filter<SuiEvent> for EventFilter {
     fn matches(&self, item: &SuiEvent) -> bool {
+        let _scope = monitored_scope("EventFilter::matches");
         self.try_matches(item).unwrap_or_default()
     }
 }

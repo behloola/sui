@@ -37,6 +37,7 @@ module basics::object_basics {
         transfer::public_freeze_object(o)
     }
 
+    #[no_lint]
     public entry fun set_value(o: &mut Object, value: u64) {
         o.value = value;
     }
@@ -57,7 +58,7 @@ module basics::object_basics {
         transfer::transfer(Wrapper { id: object::new(ctx), o }, tx_context::sender(ctx))
     }
 
-    public entry fun unwrap(w: Wrapper, ctx: &mut TxContext) {
+    public entry fun unwrap(w: Wrapper, ctx: &TxContext) {
         let Wrapper { id, o } = w;
         object::delete(id);
         transfer::public_transfer(o, tx_context::sender(ctx))

@@ -14,19 +14,19 @@ use clap::Subcommand;
 use serde::Deserialize;
 
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{SuiObjectDataOptions, SuiTransactionResponseOptions};
+use sui_json_rpc_types::{SuiObjectDataOptions, SuiTransactionBlockResponseOptions};
 use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
 use sui_sdk::{
     json::SuiJsonValue,
-    rpc_types::{SuiData, SuiTransactionEffectsAPI},
+    rpc_types::{SuiData, SuiTransactionBlockEffectsAPI},
     types::{
         base_types::{ObjectID, SuiAddress},
         id::UID,
-        messages::Transaction,
+        transaction::Transaction,
     },
     SuiClient, SuiClientBuilder,
 };
-use sui_types::messages::ExecuteTransactionRequestType;
+use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -95,17 +95,16 @@ impl TicTacToe {
         // Sign transaction.
         let signature =
             self.keystore
-                .sign_secure(&player_x, &create_game_call, Intent::default())?;
+                .sign_secure(&player_x, &create_game_call, Intent::sui_transaction())?;
 
         // Execute the transaction.
 
         let response = self
             .client
-            .quorum_driver()
-            .execute_transaction(
-                Transaction::from_data(create_game_call, Intent::default(), vec![signature])
-                    .verify()?,
-                SuiTransactionResponseOptions::full_content(),
+            .quorum_driver_api()
+            .execute_transaction_block(
+                Transaction::from_data(create_game_call, vec![signature]),
+                SuiTransactionBlockResponseOptions::full_content(),
                 Some(ExecuteTransactionRequestType::WaitForLocalExecution),
             )
             .await?;
@@ -193,18 +192,19 @@ impl TicTacToe {
                 .await?;
 
             // Sign transaction.
-            let signature =
-                self.keystore
-                    .sign_secure(&my_identity, &place_mark_call, Intent::default())?;
+            let signature = self.keystore.sign_secure(
+                &my_identity,
+                &place_mark_call,
+                Intent::sui_transaction(),
+            )?;
 
             // Execute the transaction.
             let response = self
                 .client
-                .quorum_driver()
-                .execute_transaction(
-                    Transaction::from_data(place_mark_call, Intent::default(), vec![signature])
-                        .verify()?,
-                    SuiTransactionResponseOptions::new().with_effects(),
+                .quorum_driver_api()
+                .execute_transaction_block(
+                    Transaction::from_data(place_mark_call, vec![signature]),
+                    SuiTransactionBlockResponseOptions::new().with_effects(),
                     Some(ExecuteTransactionRequestType::WaitForLocalExecution),
                 )
                 .await?;

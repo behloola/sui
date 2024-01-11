@@ -8,7 +8,7 @@ When running benchmarks, the codebase is automatically compiled with the feature
 
 ### Parametrize the benchmark
 
-After [cloning the repo and installing all dependencies](https://github.com/mystenlabs/narwhal#quick-start), you can use [Fabric](http://www.fabfile.org/) to run benchmarks on your local machine. Locate the task called `local` in the file [fabfile.py](https://github.com/MystenLabs/sui/blob/main/narwhal/benchmark/fabfile.py):
+After [cloning the repo and installing all dependencies](https://github.com/MystenLabs/sui/tree/main/narwhal#quick-start), you can use [Fabric](http://www.fabfile.org/) to run benchmarks on your local machine. Locate the task called `local` in the file [fabfile.py](https://github.com/MystenLabs/sui/blob/main/narwhal/benchmark/fabfile.py):
 
 ```python
 @task
@@ -39,25 +39,13 @@ The nodes parameters determine the configuration for the primaries and workers:
 node_params = {
     'header_num_of_batches_threshold': 32,
     'max_header_num_of_batches': 1000,
-    'max_header_delay': '2000ms',
+    'max_header_delay': '1000ms',
     'min_header_delay': '500ms',
     'gc_depth': 50,
     'sync_retry_delay': '10000ms',
     'sync_retry_nodes': 3,
     'batch_size': 500_000,
     'max_batch_delay': '100ms',
-    'block_synchronizer': {
-        'range_synchronize_timeout': '30s',
-        'certificates_synchronize_timeout': '30s',
-        'payload_synchronize_timeout': '30s',
-        'payload_availability_timeout': '30s',
-        'handler_certificate_deliver_timeout': '30s'
-    },
-    "consensus_api_grpc": {
-        "socket_addr": "/ip4/127.0.0.1/tcp/0/http",
-        "get_collections_timeout": "5_000ms",
-        "remove_collections_timeout": "5_000ms"
-    },
     'max_concurrent_requests': 500_000
 }
 ```
@@ -76,7 +64,6 @@ They are defined as follows:
 - `range_synchronize_timeout`: The timeout configuration when synchronizing a range of certificates from peers.
 - `certificates_synchronize_timeout`: The timeout configuration when requesting certificates from peers.
 - `payload_synchronize_timeout`: Timeout when has requested the payload for a certificate and is waiting to receive them.
-- `payload_availability_timeout`: The timeout configuration when for when we ask the other peers to discover who has the payload available for the dictated certificates.
 - `socket_addr`: The socket address the consensus api gRPC server should be listening to.
 - `get_collections_timeout`: The timeout configuration when requesting batches from workers.
 - `remove_collections_timeout`: The timeout configuration when removing batches from workers.
@@ -184,13 +171,13 @@ The file [settings.json](https://github.com/MystenLabs/sui/blob/main/narwhal/ben
 ```json
 {
   "key": {
-    "name": "aws",
-    "path": "/absolute/key/path"
+    "name": "aws-sui",
+    "path": "/Users/username/.ssh/aws-sui.pem"
   },
   "port": 5000,
   "repo": {
-    "name": "narwhal",
-    "url": "https://github.com/mystenlabs/narwhal.git",
+    "name": "sui",
+    "url": "https://github.com/mystenlabs/sui",
     "branch": "main"
   },
   "instances": {
@@ -229,8 +216,8 @@ The third block (`repo`) contains the information regarding the repository's nam
 
 ```json
 "repo": {
-    "name": "narwhal",
-    "url": "https://github.com/mystenlabs/narwhal.git",
+    "name": "sui",
+    "url": "https://github.com/mystenlabs/sui",
     "branch": "main"
 },
 ```
@@ -291,7 +278,7 @@ The commands `fab stop` and `fab start` respectively stop and start the testbed 
 
 ### Step 5. Run a benchmark
 
-After setting up the testbed, running a benchmark on AWS is similar to running it locally (see [Run Local Benchmarks](https://github.com/mystenlabs/narwhal/tree/main/benchmark#local-benchmarks)). Locate the task `remote` in [fabfile.py](https://github.com/MystenLabs/sui/blob/main/narwhal/benchmark/fabfile.py):
+After setting up the testbed, running a benchmark on AWS is similar to running it locally (see [Run Local Benchmarks](https://github.com/MystenLabs/sui/tree/main/narwhal/benchmark#local-benchmarks)). Locate the task `remote` in [fabfile.py](https://github.com/MystenLabs/sui/blob/main/narwhal/benchmark/fabfile.py):
 
 ```python
 @task
@@ -299,7 +286,7 @@ def remote(ctx):
     ...
 ```
 
-The benchmark parameters are similar to [local benchmarks](https://github.com/mystenlabs/narwhal/tree/main/benchmark#local-benchmarks) but allow you to specify the number of nodes and the input rate as arrays to automate multiple benchmarks with a single command. The parameter `runs` specifies the number of times to repeat each benchmark (to later compute the average and stdev of the results), and the parameter `collocate` specifies whether to collocate all the node's workers and the primary on the same machine. If `collocate` is set to `False`, the script will run one node per data center (AWS region), with its primary and each of its worker running on a dedicated instance.
+The benchmark parameters are similar to [local benchmarks](https://github.com/MystenLabs/sui/tree/main/narwhal/benchmark#local-benchmarks) but allow you to specify the number of nodes and the input rate as arrays to automate multiple benchmarks with a single command. The parameter `runs` specifies the number of times to repeat each benchmark (to later compute the average and stdev of the results), and the parameter `collocate` specifies whether to collocate all the node's workers and the primary on the same machine. If `collocate` is set to `False`, the script will run one node per data center (AWS region), with its primary and each of its worker running on a dedicated instance.
 
 ```python
 bench_params = {
@@ -348,16 +335,3 @@ plot_params = {
 The first graph ('latency') plots the latency versus the throughput. It shows that the latency is low until a fairly neat threshold after which it drastically increases. Determining this threshold is crucial to understanding the limits of the system.
 
 Another challenge is comparing apples-to-apples between different deployments of the system. The challenge here is again that latency and throughput are interdependent, as a result a throughput/number of nodes chart could be tricky to produce fairly. The way to do it is to define a maximum latency and measure the throughput at this point instead of simply pushing every system to its peak throughput (where latency is meaningless). The second graph ('tps') plots the maximum achievable throughput under a maximum latency for different numbers of nodes.
-
-## Benchmarks with failpoints
-
-[Fail points](https://docs.rs/failpoints/latest/failpoints/) are code instrumentations that allow errors and other behavior to be injected dynamically at runtime, primarily for testing purposes. Fail points are flexible and can be configured to exhibit a variety of behavior, including panics, early returns, and sleeping. They can be controlled both programmatically and via the environment, and can be triggered conditionally and probabilistically.
-
-Search the code base for `fail_point!()` macro to see the list instrumented failpoints.
-
-Example usage
-
-```
-$ FAILPOINTS='rpc-response-delay=5%sleep(10000);request-batch=5%return;report-our-batch=5%return;request-vote=5%return;certificate-store-panic=.01%return;certificate-store=5%return' \
-  fab failpoints
-```

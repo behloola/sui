@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[test_only]
 /// Tests if normally illegal (in terms of Sui bytecode verification) code is allowed in tests.
 module sui::verifier_tests {
     struct VERIFIER_TESTS has drop {}

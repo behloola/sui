@@ -7,7 +7,6 @@ use std::str::FromStr;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use fastcrypto::encoding::Hex;
-use fastcrypto::traits::ToFromBytes;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serializer};
 use serde::{Deserializer, Serialize};
@@ -15,18 +14,16 @@ use serde_json::Value;
 use strum_macros::EnumIter;
 use strum_macros::EnumString;
 
-use sui_sdk::rpc_types::{SuiExecutionStatus, SuiTransactionKind};
+use sui_sdk::rpc_types::{SuiExecutionStatus, SuiTransactionBlockKind};
 use sui_types::base_types::{ObjectID, ObjectRef, SequenceNumber, SuiAddress, TransactionDigest};
 use sui_types::crypto::PublicKey as SuiPublicKey;
 use sui_types::crypto::SignatureScheme;
 use sui_types::governance::{ADD_STAKE_FUN_NAME, WITHDRAW_STAKE_FUN_NAME};
-use sui_types::messages::{Argument, CallArg, Command, ObjectArg, TransactionData};
 use sui_types::messages_checkpoint::CheckpointDigest;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::sui_system_state::SUI_SYSTEM_MODULE_NAME;
-use sui_types::{
-    SUI_SYSTEM_PACKAGE_ID, SUI_SYSTEM_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-};
+use sui_types::transaction::{Argument, CallArg, Command, ObjectArg, TransactionData};
+use sui_types::SUI_SYSTEM_PACKAGE_ID;
 
 use crate::errors::{Error, ErrorType};
 use crate::operations::Operations;
@@ -329,16 +326,20 @@ impl From<SuiPublicKey> for PublicKey {
     fn from(pk: SuiPublicKey) -> Self {
         match pk {
             SuiPublicKey::Ed25519(k) => PublicKey {
-                hex_bytes: Hex::from_bytes(k.as_bytes()),
+                hex_bytes: Hex::from_bytes(&k.0),
                 curve_type: CurveType::Edwards25519,
             },
             SuiPublicKey::Secp256k1(k) => PublicKey {
-                hex_bytes: Hex::from_bytes(k.as_bytes()),
+                hex_bytes: Hex::from_bytes(&k.0),
                 curve_type: CurveType::Secp256k1,
             },
             SuiPublicKey::Secp256r1(k) => PublicKey {
-                hex_bytes: Hex::from_bytes(k.as_bytes()),
+                hex_bytes: Hex::from_bytes(&k.0),
                 curve_type: CurveType::Secp256r1,
+            },
+            SuiPublicKey::ZkLogin(k) => PublicKey {
+                hex_bytes: Hex::from_bytes(&k.0),
+                curve_type: CurveType::ZkLogin, // inaccurate but added for completeness.
             },
         }
     }
@@ -360,6 +361,7 @@ pub enum CurveType {
     Secp256k1,
     Edwards25519,
     Secp256r1,
+    ZkLogin,
 }
 
 impl From<CurveType> for SignatureScheme {
@@ -368,6 +370,7 @@ impl From<CurveType> for SignatureScheme {
             CurveType::Secp256k1 => SignatureScheme::Secp256k1,
             CurveType::Edwards25519 => SignatureScheme::ED25519,
             CurveType::Secp256r1 => SignatureScheme::Secp256r1,
+            CurveType::ZkLogin => SignatureScheme::ZkLoginAuthenticator,
         }
     }
 }
@@ -409,18 +412,31 @@ pub enum OperationType {
     Genesis,
     ConsensusCommitPrologue,
     ProgrammableTransaction,
+    AuthenticatorStateUpdate,
+    RandomnessStateUpdate,
+    EndOfEpochTransaction,
 }
 
-impl From<&SuiTransactionKind> for OperationType {
-    fn from(tx: &SuiTransactionKind) -> Self {
+impl From<&SuiTransactionBlockKind> for OperationType {
+    fn from(tx: &SuiTransactionBlockKind) -> Self {
         match tx {
-            SuiTransactionKind::ChangeEpoch(_) => OperationType::EpochChange,
-            SuiTransactionKind::Genesis(_) => OperationType::Genesis,
-            SuiTransactionKind::ConsensusCommitPrologue(_) => {
+            SuiTransactionBlockKind::ChangeEpoch(_) => OperationType::EpochChange,
+            SuiTransactionBlockKind::Genesis(_) => OperationType::Genesis,
+            SuiTransactionBlockKind::ConsensusCommitPrologue(_)
+            | SuiTransactionBlockKind::ConsensusCommitPrologueV2(_) => {
                 OperationType::ConsensusCommitPrologue
             }
-            SuiTransactionKind::ProgrammableTransaction(_) => {
+            SuiTransactionBlockKind::ProgrammableTransaction(_) => {
                 OperationType::ProgrammableTransaction
+            }
+            SuiTransactionBlockKind::AuthenticatorStateUpdate(_) => {
+                OperationType::AuthenticatorStateUpdate
+            }
+            SuiTransactionBlockKind::RandomnessStateUpdate(_) => {
+                OperationType::RandomnessStateUpdate
+            }
+            SuiTransactionBlockKind::EndOfEpochTransaction(_) => {
+                OperationType::EndOfEpochTransaction
             }
         }
     }
@@ -880,22 +896,17 @@ impl InternalOperation {
                 validator, amount, ..
             } => {
                 let mut builder = ProgrammableTransactionBuilder::new();
-                let system_state = CallArg::Object(ObjectArg::SharedObject {
-                    id: SUI_SYSTEM_STATE_OBJECT_ID,
-                    initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                    mutable: true,
-                });
 
                 // [WORKAROUND] - this is a hack to work out if the staking ops is for a selected amount or None amount (whole wallet).
                 // if amount is none, validator input will be created after the system object input
                 let (validator, system_state, amount) = if let Some(amount) = amount {
                     let amount = builder.pure(amount)?;
                     let validator = builder.input(CallArg::Pure(bcs::to_bytes(&validator)?))?;
-                    let state = builder.input(system_state)?;
+                    let state = builder.input(CallArg::SUI_SYSTEM_MUT)?;
                     (validator, state, amount)
                 } else {
                     let amount = builder.pure(metadata.total_coin_value - metadata.budget)?;
-                    let state = builder.input(system_state)?;
+                    let state = builder.input(CallArg::SUI_SYSTEM_MUT)?;
                     let validator = builder.input(CallArg::Pure(bcs::to_bytes(&validator)?))?;
                     (validator, state, amount)
                 };
@@ -914,22 +925,17 @@ impl InternalOperation {
             }
             InternalOperation::WithdrawStake { stake_ids, .. } => {
                 let mut builder = ProgrammableTransactionBuilder::new();
-                let system_state = CallArg::Object(ObjectArg::SharedObject {
-                    id: SUI_SYSTEM_STATE_OBJECT_ID,
-                    initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                    mutable: true,
-                });
 
                 for stake_id in metadata.objects {
                     // [WORKAROUND] - this is a hack to work out if the withdraw stake ops is for selected stake_ids or None (all stakes) using the index of the call args.
                     // if stake_ids is not empty, id input will be created after the system object input
                     let (system_state, id) = if !stake_ids.is_empty() {
-                        let system_state = builder.input(system_state.clone())?;
+                        let system_state = builder.input(CallArg::SUI_SYSTEM_MUT)?;
                         let id = builder.obj(ObjectArg::ImmOrOwnedObject(stake_id))?;
                         (system_state, id)
                     } else {
                         let id = builder.obj(ObjectArg::ImmOrOwnedObject(stake_id))?;
-                        let system_state = builder.input(system_state.clone())?;
+                        let system_state = builder.input(CallArg::SUI_SYSTEM_MUT)?;
                         (system_state, id)
                     };
 

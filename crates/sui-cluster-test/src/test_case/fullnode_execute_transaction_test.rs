@@ -4,10 +4,12 @@
 use crate::{TestCaseImpl, TestContext};
 use async_trait::async_trait;
 use sui_json_rpc_types::{
-    SuiExecutionStatus, SuiTransactionEffectsAPI, SuiTransactionResponseOptions,
+    SuiExecutionStatus, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions,
 };
 use sui_sdk::SuiClient;
-use sui_types::{base_types::TransactionDigest, messages::ExecuteTransactionRequestType};
+use sui_types::{
+    base_types::TransactionDigest, quorum_driver_types::ExecuteTransactionRequestType,
+};
 use tracing::info;
 
 pub struct FullNodeExecuteTransactionTest;
@@ -16,7 +18,7 @@ impl FullNodeExecuteTransactionTest {
     async fn verify_transaction(fullnode: &SuiClient, tx_digest: TransactionDigest) {
         fullnode
             .read_api()
-            .get_transaction_with_options(tx_digest, SuiTransactionResponseOptions::new())
+            .get_transaction_with_options(tx_digest, SuiTransactionBlockResponseOptions::new())
             .await
             .unwrap_or_else(|e| {
                 panic!(
@@ -39,7 +41,7 @@ impl TestCaseImpl for FullNodeExecuteTransactionTest {
 
     async fn run(&self, ctx: &mut TestContext) -> Result<(), anyhow::Error> {
         let txn_count = 4;
-        ctx.get_sui_from_faucet(Some(txn_count)).await;
+        ctx.get_sui_from_faucet(Some(1)).await;
 
         let mut txns = ctx.make_transactions(txn_count).await;
         assert!(
@@ -56,10 +58,10 @@ impl TestCaseImpl for FullNodeExecuteTransactionTest {
         let txn_digest = *txn.digest();
 
         let response = fullnode
-            .quorum_driver()
-            .execute_transaction(
+            .quorum_driver_api()
+            .execute_transaction_block(
                 txn,
-                SuiTransactionResponseOptions::new().with_effects(),
+                SuiTransactionBlockResponseOptions::new().with_effects(),
                 Some(ExecuteTransactionRequestType::WaitForEffectsCert),
             )
             .await?;
@@ -83,10 +85,10 @@ impl TestCaseImpl for FullNodeExecuteTransactionTest {
         let txn_digest = *txn.digest();
 
         let response = fullnode
-            .quorum_driver()
-            .execute_transaction(
+            .quorum_driver_api()
+            .execute_transaction_block(
                 txn,
-                SuiTransactionResponseOptions::new().with_effects(),
+                SuiTransactionBlockResponseOptions::new().with_effects(),
                 Some(ExecuteTransactionRequestType::WaitForLocalExecution),
             )
             .await?;

@@ -11,11 +11,11 @@ use serde::Serialize;
 
 use crate::{
     base_types::{ObjectID, ObjectRef, SuiAddress},
-    messages::{
+    move_package::PACKAGE_MODULE_NAME,
+    transaction::{
         Argument, CallArg, Command, ObjectArg, ProgrammableMoveCall, ProgrammableTransaction,
     },
-    move_package::PACKAGE_MODULE_NAME,
-    SUI_FRAMEWORK_OBJECT_ID,
+    SUI_FRAMEWORK_PACKAGE_ID,
 };
 
 #[derive(PartialEq, Eq, Hash)]
@@ -191,7 +191,7 @@ impl ProgrammableTransactionBuilder {
         let cap = self.publish_upgradeable(modules, dep_ids);
         self.commands
             .push(Command::MoveCall(Box::new(ProgrammableMoveCall {
-                package: SUI_FRAMEWORK_OBJECT_ID,
+                package: SUI_FRAMEWORK_PACKAGE_ID,
                 module: PACKAGE_MODULE_NAME.to_owned(),
                 function: ident_str!("make_immutable").to_owned(),
                 type_arguments: vec![],
@@ -269,8 +269,7 @@ impl ProgrammableTransactionBuilder {
         amounts: Vec<u64>,
     ) -> anyhow::Result<()> {
         let mut coins = coins.into_iter();
-        let Some(coin) = coins.next()
-        else {
+        let Some(coin) = coins.next() else {
             anyhow::bail!("coins vector is empty");
         };
         let coin_arg = self.obj(ObjectArg::ImmOrOwnedObject(coin))?;

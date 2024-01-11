@@ -8,11 +8,14 @@ use crypto::{NetworkPublicKey, Signature};
 use fastcrypto::signature_service::SignatureService;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use mysten_metrics::metered_channel::Receiver;
 use mysten_metrics::{monitored_future, spawn_logged_monitored_task};
 use network::anemo_ext::NetworkExt;
 use std::sync::Arc;
 use std::time::Duration;
-use storage::{CertificateStore, HeaderStore};
+use storage::CertificateStore;
+use sui_macros::fail_point_async;
+use sui_protocol_config::ProtocolConfig;
 use tokio::{
     sync::oneshot,
     task::{JoinHandle, JoinSet},
@@ -21,9 +24,8 @@ use tracing::{debug, enabled, error, info, instrument, warn};
 use types::{
     ensure,
     error::{DagError, DagResult},
-    metered_channel::Receiver,
     Certificate, CertificateDigest, ConditionalBroadcastReceiver, Header, HeaderAPI,
-    PrimaryToPrimaryClient, RequestVoteRequest, Vote,
+    PrimaryToPrimaryClient, RequestVoteRequest, Vote, VoteAPI,
 };
 
 #[cfg(test)]
@@ -40,8 +42,7 @@ pub struct Certifier {
     authority_id: AuthorityIdentifier,
     /// The committee information.
     committee: Committee,
-    /// The persistent storage keyed to headers.
-    header_store: HeaderStore,
+    protocol_config: ProtocolConfig,
     /// The persistent storage keyed to certificates.
     certificate_store: CertificateStore,
     /// Handles synchronization with other nodes and our workers.
@@ -72,7 +73,7 @@ impl Certifier {
     pub fn spawn(
         authority_id: AuthorityIdentifier,
         committee: Committee,
-        header_store: HeaderStore,
+        protocol_config: ProtocolConfig,
         certificate_store: CertificateStore,
         synchronizer: Arc<Synchronizer>,
         signature_service: SignatureService<Signature, { crypto::INTENT_MESSAGE_LENGTH }>,
@@ -86,7 +87,7 @@ impl Certifier {
                 Self {
                     authority_id,
                     committee,
-                    header_store,
+                    protocol_config,
                     certificate_store,
                     synchronizer,
                     signature_service,
@@ -129,12 +130,6 @@ impl Certifier {
         let peer_id = anemo::PeerId(target.0.to_bytes());
         let peer = network.waiting_peer(peer_id);
 
-        fail::fail_point!("request-vote", |_| {
-            Err(DagError::NetworkError(format!(
-                "Injected error in request vote for {header}"
-            )))
-        });
-
         let mut client = PrimaryToPrimaryClient::new(peer);
 
         let mut missing_parents: Vec<CertificateDigest> = Vec::new();
@@ -163,14 +158,12 @@ impl Certifier {
                 parents
             };
 
-            // TODO: Remove timeout from this RPC once anemo issue #10 is resolved.
-            match client
-                .request_vote(RequestVoteRequest {
-                    header: header.clone(),
-                    parents,
-                })
-                .await
-            {
+            let request = anemo::Request::new(RequestVoteRequest {
+                header: header.clone(),
+                parents,
+            })
+            .with_timeout(Duration::from_secs(30));
+            match client.request_vote(request).await {
                 Ok(response) => {
                     let response = response.into_body();
                     if response.vote.is_some() {
@@ -205,40 +198,40 @@ impl Certifier {
 
         // Verify the vote. Note that only the header digest is signed by the vote.
         ensure!(
-            vote.header_digest == header.digest()
-                && vote.origin == header.author()
-                && vote.author == authority,
-            DagError::UnexpectedVote(vote.header_digest)
+            vote.header_digest() == header.digest()
+                && vote.origin() == header.author()
+                && vote.author() == authority,
+            DagError::UnexpectedVote(vote.header_digest())
         );
         // Possible equivocations.
         ensure!(
-            header.epoch() == vote.epoch,
+            header.epoch() == vote.epoch(),
             DagError::InvalidEpoch {
                 expected: header.epoch(),
-                received: vote.epoch
+                received: vote.epoch()
             }
         );
         ensure!(
-            header.round() == vote.round,
+            header.round() == vote.round(),
             DagError::InvalidRound {
                 expected: header.round(),
-                received: vote.round
+                received: vote.round()
             }
         );
 
         // Ensure the header is from the correct epoch.
         ensure!(
-            vote.epoch == committee.epoch(),
+            vote.epoch() == committee.epoch(),
             DagError::InvalidEpoch {
                 expected: committee.epoch(),
-                received: vote.epoch
+                received: vote.epoch()
             }
         );
 
         // Ensure the authority has voting rights.
         ensure!(
-            committee.stake_by_id(vote.author) > 0,
-            DagError::UnknownAuthority(vote.author.to_string())
+            committee.stake_by_id(vote.author()) > 0,
+            DagError::UnknownAuthority(vote.author().to_string())
         );
 
         Ok(vote)
@@ -248,7 +241,7 @@ impl Certifier {
     async fn propose_header(
         authority_id: AuthorityIdentifier,
         committee: Committee,
-        header_store: HeaderStore,
+        protocol_config: ProtocolConfig,
         certificate_store: CertificateStore,
         signature_service: SignatureService<Signature, { crypto::INTENT_MESSAGE_LENGTH }>,
         metrics: Arc<PrimaryMetrics>,
@@ -268,12 +261,10 @@ impl Certifier {
             });
         }
 
-        // Process the header.
-        header_store.write(&header)?;
         metrics.proposed_header_round.set(header.round() as i64);
 
         // Reset the votes aggregator and sign our own header.
-        let mut votes_aggregator = VotesAggregator::new(metrics.clone());
+        let mut votes_aggregator = VotesAggregator::new(&protocol_config, metrics.clone());
         let vote = Vote::new(&header, &authority_id, &signature_service).await;
         let mut certificate = votes_aggregator.append(vote, &committee, &header)?;
 
@@ -383,15 +374,16 @@ impl Certifier {
 
                     let name = self.authority_id;
                     let committee = self.committee.clone();
-                    let header_store = self.header_store.clone();
                     let certificate_store = self.certificate_store.clone();
                     let signature_service = self.signature_service.clone();
                     let metrics = self.metrics.clone();
                     let network = self.network.clone();
+                    let protocol_config = self.protocol_config.clone();
+                    fail_point_async!("narwhal-delay");
                     self.propose_header_tasks.spawn(monitored_future!(Self::propose_header(
                         name,
                         committee,
-                        header_store,
+                        protocol_config,
                         certificate_store,
                         signature_service,
                         metrics,
@@ -407,10 +399,21 @@ impl Certifier {
                 Some(result) = self.propose_header_tasks.join_next() => {
                     match result {
                         Ok(Ok(certificate)) => {
-                            self.synchronizer.accept_own_certificate(certificate, &self.network).await
+                            fail_point_async!("narwhal-delay");
+                            self.synchronizer.accept_own_certificate(certificate).await
                         },
                         Ok(Err(e)) => Err(e),
-                        Err(_) => Err(DagError::ShuttingDown),
+                        Err(e) => {
+                            if e.is_cancelled() {
+                                // Ungraceful shutdown.
+                                Err(DagError::ShuttingDown)
+                            } else if e.is_panic() {
+                                // propagate panics.
+                                std::panic::resume_unwind(e.into_panic());
+                            } else {
+                                panic!("propose header task failed: {e}");
+                            }
+                        },
                     }
                 },
 

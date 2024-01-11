@@ -6,6 +6,10 @@ hakari-package = "workspace-hack"
 # Format for `workspace-hack = ...` lines in other Cargo.tomls.
 dep-format-version = "4"
 
+# Output lines as `omicron-workspace-hack.workspace = true`. Requires
+# cargo-hakari 0.9.28 or above.
+workspace-hack-line-style = "workspace-dotted"
+
 # Setting workspace.resolver = "2" in the root Cargo.toml is HIGHLY recommended.
 # Hakari works much better with the new feature resolver.
 # For more about the new feature resolver, see:
@@ -29,15 +33,14 @@ output-single-feature = true
 [traversal-excludes]
 workspace-members = [ "sui-move" ]
 third-party = [
-    ## Exclude the 'move-unit-test' crate in order to ensure that the 'testing'
-    # feature isn't enabled in the workspace-hack
-    { name = "move-unit-test", git = "https://github.com/move-language/move", rev = "60cec12b1ed9382836aa4c141e445656d39375e1" },
-    { name = "move-cli", git = "https://github.com/move-language/move", rev = "60cec12b1ed9382836aa4c141e445656d39375e1" },
-    { name = "move-transactional-test-runner", git = "https://github.com/move-language/move", rev = "60cec12b1ed9382836aa4c141e445656d39375e1" },
     { name = "object_store" },
 ]
 
 [final-excludes]
 workspace-members = [
     "x",
+]
+third-party = [
+    { name = "rocksdb" },
+    { name = "librocksdb-sys" },
 ]

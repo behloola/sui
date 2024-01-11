@@ -1,0 +1,27 @@
+[package]
+name = "consensus-core"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Mysten Labs <build@mystenlabs.com>"]
+edition = "2021"
+publish = false
+
+[dependencies]
+base64.workspace = true
+bcs.workspace = true
+bytes.workspace = true
+fastcrypto.workspace = true
+serde.workspace = true
+prometheus.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+enum_dispatch.workspace = true
+
+consensus-config.workspace = true
+sui-protocol-config.workspace = true
+
+workspace-hack.workspace = true
+
+mysten-metrics = { path = "../../crates/mysten-metrics" }

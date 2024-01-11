@@ -2,34 +2,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use either::Either;
+use fastcrypto_zkp::bn254::zk_login::JwkId;
+use fastcrypto_zkp::bn254::zk_login::{OIDCProvider, JWK};
+use fastcrypto_zkp::bn254::zk_login_api::ZkLoginEnv;
 use futures::pin_mut;
+use im::hashmap::HashMap as ImHashMap;
 use itertools::izip;
 use lru::LruCache;
+use mysten_metrics::monitored_scope;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use prometheus::{register_int_counter_with_registry, IntCounter, Registry};
 use shared_crypto::intent::Intent;
 use std::hash::Hash;
 use std::sync::Arc;
+use sui_types::digests::SenderSignedDataDigest;
+use sui_types::digests::ZKLoginInputsDigest;
+use sui_types::transaction::SenderSignedData;
 use sui_types::{
     committee::Committee,
     crypto::{AuthoritySignInfoTrait, VerificationObligation},
     digests::CertificateDigest,
     error::{SuiError, SuiResult},
-    message_envelope::Message,
-    messages::{CertifiedTransaction, VerifiedCertificate},
+    message_envelope::{AuthenticatedMessage, Message},
     messages_checkpoint::SignedCheckpointSummary,
+    signature::VerifyParams,
+    transaction::{CertifiedTransaction, VerifiedCertificate},
 };
-
-use mysten_metrics::monitored_scope;
-use sui_types::digests::SenderSignedDataDigest;
-use sui_types::messages::SenderSignedData;
 use tap::TapFallible;
 use tokio::runtime::Handle;
 use tokio::{
     sync::oneshot,
     time::{timeout, Duration},
 };
-
+use tracing::debug;
 // Maximum amount of time we wait for a batch to fill up before verifying a partial batch.
 const BATCH_TIMEOUT_MS: Duration = Duration::from_millis(10);
 
@@ -88,34 +93,89 @@ pub struct SignatureVerifier {
     committee: Arc<Committee>,
     certificate_cache: VerifiedDigestCache<CertificateDigest>,
     signed_data_cache: VerifiedDigestCache<SenderSignedDataDigest>,
+    zklogin_inputs_cache: VerifiedDigestCache<ZKLoginInputsDigest>,
+
+    /// Map from JwkId (iss, kid) to the fetched JWK for that key.
+    /// We use an immutable data structure because verification of ZKLogins may be slow, so we
+    /// don't want to pass a reference to the map to the verify method, since that would lead to a
+    /// lengthy critical section. Instead, we use an immutable data structure which can be cloned
+    /// very cheaply.
+    jwks: RwLock<ImHashMap<JwkId, JWK>>,
+
+    /// Params that contains a list of supported providers for ZKLogin and the environment (prod/test) the code runs in.
+    zk_login_params: ZkLoginParams,
 
     queue: Mutex<CertBuffer>,
-    pub metrics: Arc<VerifiedDigestCacheMetrics>,
+    pub metrics: Arc<SignatureVerifierMetrics>,
+}
+
+/// Contains two parameters to pass in to verify a ZkLogin signature.
+#[derive(Clone)]
+struct ZkLoginParams {
+    /// A list of supported OAuth providers for ZkLogin.
+    pub supported_providers: Vec<OIDCProvider>,
+    /// The environment (prod/test) the code runs in. It decides which verifying key to use in fastcrypto.
+    pub env: ZkLoginEnv,
+    pub verify_legacy_zklogin_address: bool,
+    pub accept_zklogin_in_multisig: bool,
 }
 
 impl SignatureVerifier {
     pub fn new_with_batch_size(
         committee: Arc<Committee>,
         batch_size: usize,
-        metrics: Arc<VerifiedDigestCacheMetrics>,
+        metrics: Arc<SignatureVerifierMetrics>,
+        supported_providers: Vec<OIDCProvider>,
+        env: ZkLoginEnv,
+        verify_legacy_zklogin_address: bool,
+        accept_zklogin_in_multisig: bool,
     ) -> Self {
         Self {
             committee,
             certificate_cache: VerifiedDigestCache::new(
                 metrics.certificate_signatures_cache_hits.clone(),
+                metrics.certificate_signatures_cache_misses.clone(),
                 metrics.certificate_signatures_cache_evictions.clone(),
             ),
             signed_data_cache: VerifiedDigestCache::new(
                 metrics.signed_data_cache_hits.clone(),
+                metrics.signed_data_cache_misses.clone(),
                 metrics.signed_data_cache_evictions.clone(),
             ),
+            zklogin_inputs_cache: VerifiedDigestCache::new(
+                metrics.zklogin_inputs_cache_hits.clone(),
+                metrics.zklogin_inputs_cache_misses.clone(),
+                metrics.zklogin_inputs_cache_evictions.clone(),
+            ),
+            jwks: Default::default(),
             queue: Mutex::new(CertBuffer::new(batch_size)),
             metrics,
+            zk_login_params: ZkLoginParams {
+                supported_providers,
+                env,
+                verify_legacy_zklogin_address,
+                accept_zklogin_in_multisig,
+            },
         }
     }
 
-    pub fn new(committee: Arc<Committee>, metrics: Arc<VerifiedDigestCacheMetrics>) -> Self {
-        Self::new_with_batch_size(committee, MAX_BATCH_SIZE, metrics)
+    pub fn new(
+        committee: Arc<Committee>,
+        metrics: Arc<SignatureVerifierMetrics>,
+        supported_providers: Vec<OIDCProvider>,
+        zklogin_env: ZkLoginEnv,
+        verify_legacy_zklogin_address: bool,
+        accept_zklogin_in_multisig: bool,
+    ) -> Self {
+        Self::new_with_batch_size(
+            committee,
+            MAX_BATCH_SIZE,
+            metrics,
+            supported_providers,
+            zklogin_env,
+            verify_legacy_zklogin_address,
+            accept_zklogin_in_multisig,
+        )
     }
 
     /// Verifies all certs, returns Ok only if all are valid.
@@ -238,7 +298,7 @@ impl SignatureVerifier {
 
     fn process_queue_sync(
         committee: Arc<Committee>,
-        metrics: Arc<VerifiedDigestCacheMetrics>,
+        metrics: Arc<SignatureVerifierMetrics>,
         buffer: CertBuffer,
     ) {
         let _scope = monitored_scope("BatchCertificateVerifier::process_queue");
@@ -264,17 +324,66 @@ impl SignatureVerifier {
         });
     }
 
+    /// Insert a JWK into the verifier state. Pre-existing entries for a given JwkId will not be
+    /// overwritten.
+    pub(crate) fn insert_jwk(&self, jwk_id: &JwkId, jwk: &JWK) {
+        let mut jwks = self.jwks.write();
+        match jwks.entry(jwk_id.clone()) {
+            im::hashmap::Entry::Occupied(_) => {
+                debug!("JWK with kid {:?} already exists", jwk_id);
+            }
+            im::hashmap::Entry::Vacant(entry) => {
+                debug!("inserting JWK with kid: {:?}", jwk_id);
+                entry.insert(jwk.clone());
+            }
+        }
+    }
+
+    pub fn has_jwk(&self, jwk_id: &JwkId, jwk: &JWK) -> bool {
+        let jwks = self.jwks.read();
+        jwks.get(jwk_id) == Some(jwk)
+    }
+
+    pub fn get_jwks(&self) -> ImHashMap<JwkId, JWK> {
+        self.jwks.read().clone()
+    }
+
     pub fn verify_tx(&self, signed_tx: &SenderSignedData) -> SuiResult {
-        self.signed_data_cache
-            .is_verified(signed_tx.full_message_digest(), || signed_tx.verify(None))
+        self.signed_data_cache.is_verified(
+            signed_tx.full_message_digest(),
+            || {
+                signed_tx.verify_epoch(self.committee.epoch())?;
+                let jwks = self.jwks.read().clone();
+                let verify_params = VerifyParams::new(
+                    jwks,
+                    self.zk_login_params.supported_providers.clone(),
+                    self.zk_login_params.env.clone(),
+                    self.zk_login_params.verify_legacy_zklogin_address,
+                    self.zk_login_params.accept_zklogin_in_multisig,
+                );
+                signed_tx.verify_message_signature(&verify_params)
+            },
+            || Ok(()),
+        )
+    }
+
+    pub fn clear_signature_cache(&self) {
+        self.certificate_cache.clear();
+        self.signed_data_cache.clear();
+        self.zklogin_inputs_cache.clear();
     }
 }
 
-pub struct VerifiedDigestCacheMetrics {
+pub struct SignatureVerifierMetrics {
     pub certificate_signatures_cache_hits: IntCounter,
+    pub certificate_signatures_cache_misses: IntCounter,
     pub certificate_signatures_cache_evictions: IntCounter,
     pub signed_data_cache_hits: IntCounter,
+    pub signed_data_cache_misses: IntCounter,
     pub signed_data_cache_evictions: IntCounter,
+    pub zklogin_inputs_cache_hits: IntCounter,
+    pub zklogin_inputs_cache_misses: IntCounter,
+    pub zklogin_inputs_cache_evictions: IntCounter,
     timeouts: IntCounter,
     full_batches: IntCounter,
     partial_batches: IntCounter,
@@ -282,12 +391,18 @@ pub struct VerifiedDigestCacheMetrics {
     total_failed_certs: IntCounter,
 }
 
-impl VerifiedDigestCacheMetrics {
+impl SignatureVerifierMetrics {
     pub fn new(registry: &Registry) -> Arc<Self> {
         Arc::new(Self {
             certificate_signatures_cache_hits: register_int_counter_with_registry!(
                 "certificate_signatures_cache_hits",
                 "Number of certificates which were known to be verified because of signature cache.",
+                registry
+            )
+            .unwrap(),
+            certificate_signatures_cache_misses: register_int_counter_with_registry!(
+                "certificate_signatures_cache_misses",
+                "Number of certificates which missed the signature cache",
                 registry
             )
             .unwrap(),
@@ -302,12 +417,36 @@ impl VerifiedDigestCacheMetrics {
                 "Number of signed data which were known to be verified because of signature cache.",
                 registry
             )
-                .unwrap(),
+            .unwrap(),
+            signed_data_cache_misses: register_int_counter_with_registry!(
+                "signed_data_cache_misses",
+                "Number of signed data which missed the signature cache.",
+                registry
+            )
+            .unwrap(),
             signed_data_cache_evictions: register_int_counter_with_registry!(
                 "signed_data_cache_evictions",
                 "Number of times we evict a pre-existing signed data were known to be verified because of signature cache.",
                 registry
             )
+                .unwrap(),
+                zklogin_inputs_cache_hits: register_int_counter_with_registry!(
+                    "zklogin_inputs_cache_hits",
+                    "Number of zklogin signature which were known to be partially verified because of zklogin inputs cache.",
+                    registry
+                )
+                .unwrap(),
+                zklogin_inputs_cache_misses: register_int_counter_with_registry!(
+                    "zklogin_inputs_cache_misses",
+                    "Number of zklogin signatures which missed the zklogin inputs cache.",
+                    registry
+                )
+                .unwrap(),
+                zklogin_inputs_cache_evictions: register_int_counter_with_registry!(
+                    "zklogin_inputs_cache_evictions",
+                    "Number of times we evict a pre-existing zklogin inputs digest that was known to be verified because of zklogin inputs cache.",
+                    registry
+                )
                 .unwrap(),
             timeouts: register_int_counter_with_registry!(
                 "async_batch_verifier_timeouts",
@@ -349,8 +488,10 @@ pub fn batch_verify_all_certificates_and_checkpoints(
     certs: &[CertifiedTransaction],
     checkpoints: &[SignedCheckpointSummary],
 ) -> SuiResult {
+    // certs.data() is assumed to be verified already by the caller.
+
     for ckpt in checkpoints {
-        ckpt.data().verify(Some(committee.epoch()))?;
+        ckpt.data().verify_epoch(committee.epoch())?;
     }
 
     batch_verify(committee, certs, checkpoints)
@@ -361,6 +502,14 @@ pub fn batch_verify_certificates(
     committee: &Committee,
     certs: &[CertifiedTransaction],
 ) -> Vec<SuiResult> {
+    // certs.data() is assumed to be verified already by the caller.
+    let verify_params = VerifyParams::new(
+        Default::default(),
+        Vec::new(),
+        Default::default(),
+        true,
+        true,
+    );
     match batch_verify(committee, certs, &[]) {
         Ok(_) => vec![Ok(()); certs.len()],
 
@@ -369,7 +518,7 @@ pub fn batch_verify_certificates(
             .iter()
             // TODO: verify_signature currently checks the tx sig as well, which might be cached
             // already.
-            .map(|c| c.verify_signature(committee))
+            .map(|c| c.verify_signatures_authenticated(committee, &verify_params))
             .collect(),
 
         Err(e) => vec![Err(e)],
@@ -384,21 +533,13 @@ fn batch_verify(
     let mut obligation = VerificationObligation::default();
 
     for cert in certs {
-        let idx = obligation.add_message(
-            cert.data(),
-            cert.epoch(),
-            Intent::default().with_scope(cert.scope()),
-        );
+        let idx = obligation.add_message(cert.data(), cert.epoch(), Intent::sui_app(cert.scope()));
         cert.auth_sig()
             .add_to_verification_obligation(committee, &mut obligation, idx)?;
     }
 
     for ckpt in checkpoints {
-        let idx = obligation.add_message(
-            ckpt.data(),
-            ckpt.epoch(),
-            Intent::default().with_scope(ckpt.scope()),
-        );
+        let idx = obligation.add_message(ckpt.data(), ckpt.epoch(), Intent::sui_app(ckpt.scope()));
         ckpt.auth_sig()
             .add_to_verification_obligation(committee, &mut obligation, idx)?;
     }
@@ -414,16 +555,22 @@ const VERIFIED_CERTIFICATE_CACHE_SIZE: usize = 20000;
 pub struct VerifiedDigestCache<D> {
     inner: RwLock<LruCache<D, ()>>,
     cache_hits_counter: IntCounter,
+    cache_misses_counter: IntCounter,
     cache_evictions_counter: IntCounter,
 }
 
 impl<D: Hash + Eq + Copy> VerifiedDigestCache<D> {
-    pub fn new(cache_hits_counter: IntCounter, cache_evictions_counter: IntCounter) -> Self {
+    pub fn new(
+        cache_hits_counter: IntCounter,
+        cache_misses_counter: IntCounter,
+        cache_evictions_counter: IntCounter,
+    ) -> Self {
         Self {
             inner: RwLock::new(LruCache::new(
                 std::num::NonZeroUsize::new(VERIFIED_CERTIFICATE_CACHE_SIZE).unwrap(),
             )),
             cache_hits_counter,
+            cache_misses_counter,
             cache_evictions_counter,
         }
     }
@@ -434,6 +581,7 @@ impl<D: Hash + Eq + Copy> VerifiedDigestCache<D> {
             self.cache_hits_counter.inc();
             true
         } else {
+            self.cache_misses_counter.inc();
             false
         }
     }
@@ -458,14 +606,23 @@ impl<D: Hash + Eq + Copy> VerifiedDigestCache<D> {
         });
     }
 
-    pub fn is_verified<F>(&self, digest: D, verify_callback: F) -> SuiResult
+    pub fn is_verified<F, G>(&self, digest: D, verify_callback: F, uncached_checks: G) -> SuiResult
     where
         F: FnOnce() -> SuiResult,
+        G: FnOnce() -> SuiResult,
     {
         if !self.is_cached(&digest) {
             verify_callback()?;
             self.cache_digest(digest);
+        } else {
+            // Checks that are required to be performed outside the cache.
+            uncached_checks()?;
         }
         Ok(())
+    }
+
+    pub fn clear(&self) {
+        let mut inner = self.inner.write();
+        inner.clear();
     }
 }

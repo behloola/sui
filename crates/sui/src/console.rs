@@ -10,15 +10,16 @@ use clap::CommandFactory;
 use clap::FromArgMatches;
 use clap::Parser;
 use colored::Colorize;
+use sui_sdk::wallet_context::WalletContext;
 
 use crate::client_commands::SwitchResponse;
-use crate::client_commands::{SuiClientCommandResult, SuiClientCommands, WalletContext};
+use crate::client_commands::{SuiClientCommandResult, SuiClientCommands};
 use crate::shell::{
     install_shell_plugins, AsyncHandler, CacheKey, CommandStructure, CompletionCache, Shell,
 };
 
-const SUI: &str = "   _____       _    ______                       __   
-  / ___/__  __(_)  / ____/___  ____  _________  / /__ 
+const SUI: &str = "   _____       _    ______                       __
+  / ___/__  __(_)  / ____/___  ____  _________  / /__
   \\__ \\/ / / / /  / /   / __ \\/ __ \\/ ___/ __ \\/ / _ \\
  ___/ / /_/ / /  / /___/ /_/ / / / (__  ) /_/ / /  __/
 /____/\\__,_/_/   \\____/\\____/_/ /_/____/\\____/_/\\___/";
@@ -126,10 +127,11 @@ async fn handle_command(
     // TODO: Completion data are keyed by strings, are there ways to make it more error proof?
     if let Ok(mut cache) = completion_cache.write() {
         match result {
-            SuiClientCommandResult::Addresses(ref addresses, _) => {
+            SuiClientCommandResult::Addresses(ref addresses) => {
                 let addresses = addresses
+                    .addresses
                     .iter()
-                    .map(|addr| format!("{addr}"))
+                    .map(|addr| format!("{}", addr.1))
                     .collect::<Vec<_>>();
                 cache.insert(CacheKey::flag("--address"), addresses.clone());
                 cache.insert(CacheKey::flag("--to"), addresses);

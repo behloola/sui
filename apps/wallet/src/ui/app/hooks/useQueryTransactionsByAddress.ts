@@ -1,49 +1,58 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useRpcClient } from '@mysten/core';
-import { type SuiAddress } from '@mysten/sui.js';
+import { FEATURES } from '_src/shared/experimentation/features';
+import { useFeatureValue } from '@growthbook/growthbook-react';
+import { useSuiClient } from '@mysten/dapp-kit';
+import { type SuiTransactionBlockResponse } from '@mysten/sui.js/client';
 import { useQuery } from '@tanstack/react-query';
 
-const dedupe = (arr: string[]) => Array.from(new Set(arr));
+export function useQueryTransactionsByAddress(address: string | null) {
+	const rpc = useSuiClient();
+	const refetchInterval = useFeatureValue(FEATURES.WALLET_ACTIVITY_REFETCH_INTERVAL, 20_000);
 
-export function useQueryTransactionsByAddress(address: SuiAddress | null) {
-    const rpc = useRpcClient();
+	return useQuery({
+		queryKey: ['transactions-by-address', address],
+		queryFn: async () => {
+			// combine from and to transactions
+			const [txnIds, fromTxnIds] = await Promise.all([
+				rpc.queryTransactionBlocks({
+					filter: {
+						ToAddress: address!,
+					},
+					options: {
+						showInput: true,
+						showEffects: true,
+						showEvents: true,
+					},
+				}),
+				rpc.queryTransactionBlocks({
+					filter: {
+						FromAddress: address!,
+					},
+					options: {
+						showInput: true,
+						showEffects: true,
+						showEvents: true,
+					},
+				}),
+			]);
 
-    return useQuery(
-        ['transactions-by-address', address],
-        async () => {
-            // combine from and to transactions
-            const [txnIds, fromTxnIds] = await Promise.all([
-                rpc.queryTransactions({
-                    filter: {
-                        ToAddress: address!,
-                    },
-                }),
-                rpc.queryTransactions({
-                    filter: {
-                        FromAddress: address!,
-                    },
-                }),
-            ]);
-            // TODO: replace this with queryTransactions
-            // It seems to be expensive to fetch all transaction data at once though
-            const resp = await rpc.multiGetTransactions({
-                digests: dedupe(
-                    [...txnIds.data, ...fromTxnIds.data].map((x) => x.digest)
-                ),
-                options: {
-                    showInput: true,
-                    showEffects: true,
-                    showEvents: true,
-                },
-            });
+			const inserted = new Map();
+			const uniqueList: SuiTransactionBlockResponse[] = [];
 
-            return resp.sort(
-                // timestamp could be null, so we need to handle
-                (a, b) => (b.timestampMs || 0) - (a.timestampMs || 0)
-            );
-        },
-        { enabled: !!address, staleTime: 10 * 1000 }
-    );
+			[...txnIds.data, ...fromTxnIds.data]
+				.sort((a, b) => Number(b.timestampMs ?? 0) - Number(a.timestampMs ?? 0))
+				.forEach((txb) => {
+					if (inserted.get(txb.digest)) return;
+					uniqueList.push(txb);
+					inserted.set(txb.digest, true);
+				});
+
+			return uniqueList;
+		},
+		enabled: !!address,
+		staleTime: 10 * 1000,
+		refetchInterval,
+	});
 }

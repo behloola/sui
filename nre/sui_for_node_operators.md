@@ -6,6 +6,7 @@ This document is focused on running the Sui Node software as a Validator.
 
 ## Contents
 
+- [Requirements](#requirements)
 - [Deployment](#deployment)
 - [Configuration](#configuration)
 - [Connectivity](#connectivity)
@@ -18,6 +19,15 @@ This document is focused on running the Sui Node software as a Validator.
 - [Software Updates](#software-updates)
 - [State Sync](#state-sync)
 - [Chain Operations](#chain-operations)
+- [Private Security Fixes](#private-security-fixes)
+
+## Requirements
+
+To run a Sui Validator a machine with the following is required:
+- CPU: 24 physical cores (or 48 virtual cores)
+- Memory: 128 GB
+- Storage: 4 TB NVME
+- Network: 1 Gbps
 
 ## Deployment
 
@@ -67,7 +77,7 @@ Sui Node uses the following ports by default:
 | ------------- | ---------------- | --------------------------------- |
 | TCP/8080      | inbound          | protocol/transaction interface    |
 | UDP/8081      | inbound/outbound | narwhal primary interface         |
-| UDP/8082      | inbound/outbound | narwhal worker interface         |
+| UDP/8082      | inbound/outbound | narwhal worker interface          |
 | TCP/8083      | localhost        | sui -> narwhal interface          |
 | UDP/8084      | inbound/outbound | peer to peer state sync interface |
 | TCP/8443      | outbound         | metrics pushing                   |
@@ -77,7 +87,7 @@ To run a validator successfully it is critical that ports 8080-8084 are open as 
 
 ## Storage
 
-All Sui Node related data is stored by default under `/opt/sui/db/`. This is controlled in the Sui Node configuration file.
+All Sui Node-related data is stored by default under `/opt/sui/db/`. This is controlled in the Sui Node configuration file.
 
 ```shell
 $ cat /opt/sui/config/validator.yaml | grep db-path
@@ -179,7 +189,7 @@ curl localhost:1337/logging -d "info"
 
 Public dashboard for network wide visibility:
 
-- [Sui Testnet Validators](https://metrics.testnet.sui.io/public-dashboards/49484483fe0a40e9ae5d0fad331cda5b)
+- [Sui Testnet Validators](https://metrics.sui.io/public-dashboards/9b841d63c9bf43fe8acec4f0fa991f5e)
 
 ## Software Updates
 
@@ -194,7 +204,7 @@ Checkpoints in Sui contain the permanent history of the network. They are compar
 
 These checkpoints are synchronized between validators and fullnodes via a dedicated peer to peer state sync interface.
 
-Inter-validator state sync is always permitted however there are controls available to limit what fullnodes are allowed to sync from a specific validator. 
+Inter-validator state sync is always permitted however there are controls available to limit what fullnodes are allowed to sync from a specific validator.
 
 The default and recommended `max-concurrent-connections: 0` configuration does not affect inter-validator state sync, but will restrict all fullnodes from syncing. The Sui Node [configuration](#configuration) can be modified to allow a known fullnode to sync from a validator:
 
@@ -230,10 +240,11 @@ It is recommended and often required that the `sui` binary release/version match
 You can leverage [Validator Tool](validator_tool.md) to perform majority of the following tasks.
 
 An active/pending validator can update its on-chain metadata by submitting a transaction. Some metadata changes take effect immediately, including:
-* name
-* description
-* image url
-* project url
+
+- name
+- description
+- image url
+- project url
 
 Other metadata (keys, addresses etc) only come into effect at the next epoch.
 
@@ -242,13 +253,13 @@ To update metadata, a validator makes a MoveCall transaction that interacts with
 1. to update name to `new_validator_name`, use the Sui Client CLI to call `sui_system::update_validator_name`:
 
 ```
-sui client call --package 0x2 --module sui_system --function update_validator_name --args 0x5 \"new_validator_name\" --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function update_validator_name --args 0x5 \"new_validator_name\" --gas-budget 10000
 ```
 
 2. to update p2p address starting from next epoch to `/ip4/192.168.1.1`, use the Sui Client CLI to call `sui_system::update_validator_next_epoch_p2p_address`:
 
 ```
-sui client call --package 0x2 --module sui_system --function update_validator_next_epoch_p2p_address --args 0x5 "[4, 192, 168, 1, 1]" --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function update_validator_next_epoch_p2p_address --args 0x5 "[4, 192, 168, 1, 1]" --gas-budget 10000
 ```
 
 See the [full list of metadata update functions here](https://github.com/MystenLabs/sui/blob/main/crates/sui-framework/packages/sui-system/sources/sui_system.move#L267-L444).
@@ -262,7 +273,7 @@ Upon creating a `Validator`, an `UnverifiedValidatorOperationCap` is created as 
 To rotate the delegatee address or revoke the authorization, the current holder of `Cap` transfers it to another address. In the event of compromised or lost keys, the validator could create a new `Cap` object to invalidate the incumbent one. This is done by calling `sui_system::rotate_operation_cap`:
 
 ```
-sui client call --package 0x2 --module sui_system --function rotate_operation_cap --args 0x5 --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function rotate_operation_cap --args 0x5 --gas-budget 10000
 ```
 
 By default the new `Cap` object is transferred to the validator address, which then could be transferred to the new delegatee address. At this point, the old `Cap` becomes invalidated and no longer represents eligibility.
@@ -274,7 +285,7 @@ To get the current valid `Cap` object's ID of a validator, use the Sui Client CL
 To update the Gas Price Survey Quote of a validator, which is used to calculate the Reference Gas Price at the end of the epoch, the sender needs to hold a valid [`UnverifiedValidatorOperationCap`](#operation-cap). The sender could be the validator itself, or a trusted delegatee. To do so, call `sui_system::request_set_gas_price`:
 
 ```
-sui client call --package 0x2 --module sui_system --function request_set_gas_price --args 0x5 {cap_object_id} {new_gas_price} --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function request_set_gas_price --args 0x5 {cap_object_id} {new_gas_price} --gas-budget 10000
 ```
 
 ### Reporting/Un-reporting Validators
@@ -282,7 +293,7 @@ sui client call --package 0x2 --module sui_system --function request_set_gas_pri
 To report a validator or undo an existing reporting, the sender needs to hold a valid [`UnverifiedValidatorOperationCap`](#operation-cap). The sender could be the validator itself, or a trusted delegatee. To do so, call `sui_system::report_validator/undo_report_validator`:
 
 ```
-sui client call --package 0x2 --module sui_system --function report_validator/undo_report_validator --args 0x5 {cap_object_id} {reportee_address} --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function report_validator/undo_report_validator --args 0x5 {cap_object_id} {reportee_address} --gas-budget 10000
 ```
 
 Once a validator is reported by `2f + 1` other validators by voting power, their staking rewards will be slashed.
@@ -292,20 +303,39 @@ Once a validator is reported by `2f + 1` other validators by voting power, their
 In order for a Sui address to join the validator set, they need to first sign up as a validator candidate by calling `sui_system::request_add_validator_candidate` with their metadata and initial configs:
 
 ```
-sui client call --package 0x2 --module sui_system --function request_add_validator_candidate --args 0x5 {protocol_pubkey_bytes {network_pubkey_bytes} {worker_pubkey_bytes} {proof_of_possession} {name} {description} {image_url} {project_url} {net_address}
+sui client call --package 0x3 --module sui_system --function request_add_validator_candidate --args 0x5 {protocol_pubkey_bytes} {network_pubkey_bytes} {worker_pubkey_bytes} {proof_of_possession} {name} {description} {image_url} {project_url} {net_address}
 {p2p_address} {primary_address} {worker_address} {gas_price} {commission_rate} --gas-budget 10000
 ```
 
-After an address becomes a validator candidate, any address (including the candidate address itself) can start staking with the candidate's staking pool. Refer to our dedicated staking FAQ on how staking works. Once a candidate's staking pool has accumulated at least `sui_system::MIN_VALIDATOR_JOINING_STAKE` amount of stake, the candidate can call `sui_system::request_add_validator` to officially add themselves to next epoch's active validator set:
+After an address becomes a validator candidate, any address (including the candidate address itself) can start staking with the candidate's staking pool. Refer to our dedicated staking FAQ on how staking works. Once a candidate's staking pool has accumulated at least `sui_system::MIN_VALIDATOR_JOINING_STAKE` amount of stake, the candidate can call `sui_system::request_add_validator` to officially add themselves to the next epoch's active validator set:
+
 ```
-sui client call --package 0x2 --module sui_system --function request_add_validator --args 0x5 --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function request_add_validator --args 0x5 --gas-budget 10000000
 ```
 
 ### Leaving the Validator Set
 
-To leave the validator set starting next epoch, the sender needs to be an active validator in the current epoch and should call `sui_system::request_remove_validator`:
+To leave the validator set starting the next epoch, the sender needs to be an active validator in the current epoch and should call `sui_system::request_remove_validator`:
+
 ```
-sui client call --package 0x2 --module sui_system --function request_remove_validator --args 0x5 --gas-budget 10000
+sui client call --package 0x3 --module sui_system --function request_remove_validator --args 0x5 --gas-budget 10000
 ```
 
 After the validator is removed at the next epoch change, the staking pool will become inactive and stakes can only be withdrawn from an inactive pool.
+
+## Private Security Fixes
+
+There may be instances where urgent security fixes need to be rolled out before publicly announcing it's presence (Issues affecting liveliness, invariants such as SUI supply, governance etc). In order to not be actively exploited MystenLabs will release signed security binaries incorporating such fixes with a delay in publishing the source code until a large % of our validators have patched the vulnerability.
+
+This release process will be different and we expect us to announce the directory for such binaries out of band.
+Our public key to verify these binaries would be stored [here](https://sui-private.s3.us-west-2.amazonaws.com/sui_security_release.pem)
+
+You can download all the necessary signed binaries and docker artifacts incorporating the security fixes by using the [download_private.sh](https://github.com/MystenLabs/sui/blob/main/nre/download_private.sh)
+
+Usage
+`./download_private.sh <directory-name>`
+
+You can also download and verify specific binaries that may not be included by the above script using the [download_and_verify_private_binary.sh](https://github.com/MystenLabs/sui/blob/main/nre/download_and_verify_private_binary.sh) script.
+
+Usage:
+`./download_and_verify_private_binary.sh <directory-name> <binary-name>`

@@ -2,6 +2,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use crate::{CertificateDigest, HeaderDigest, Round, TimestampMs, VoteDigest};
+use anemo::PeerId;
 use config::Epoch;
 use fastcrypto::hash::Digest;
 use mysten_common::sync::notify_once::NotifyOnce;
@@ -45,17 +46,35 @@ pub enum DagError {
     #[error("Invalid signature")]
     InvalidSignature,
 
+    #[error("Invalid randomness signature")]
+    InvalidRandomnessSignature,
+
+    #[error("Randomness not yet available")]
+    RandomnessUnavailable,
+
     #[error("Storage failure: {0}")]
     StoreError(#[from] StoreError),
 
     #[error("Invalid header digest")]
     InvalidHeaderDigest,
 
+    #[error("Invalid system message")]
+    InvalidSystemMessage,
+
+    #[error("Duplicate system message")]
+    DuplicateSystemMessage,
+
+    #[error("Invalid certificate version")]
+    InvalidCertificateVersion,
+
     #[error("Header {0} has bad worker IDs")]
     HeaderHasBadWorkerIds(HeaderDigest),
 
     #[error("Header {0} has parents with invalid round numbers")]
     HeaderHasInvalidParentRoundNumbers(HeaderDigest),
+
+    #[error("Header {0} has parents with invalid timestamp")]
+    HeaderHasInvalidParentTimestamp(HeaderDigest),
 
     #[error("Header {0} has more than one parent certificate with the same authority")]
     HeaderHasDuplicateParentAuthorities(HeaderDigest),
@@ -69,8 +88,11 @@ pub enum DagError {
     #[error("Received unexpected vote for header {0}")]
     UnexpectedVote(HeaderDigest),
 
-    #[error("Already sent a vote with digest {0} for round {1}")]
-    AlreadyVoted(VoteDigest, Round),
+    #[error("Already voted with a different digest {0} at round {2}, for header {1}")]
+    AlreadyVoted(VoteDigest, HeaderDigest, Round),
+
+    #[error("Already voted a newer header for digest {0} round {1} < {2}")]
+    AlreadyVotedNewerHeader(HeaderDigest, Round, Round),
 
     #[error("Could not form a certificate for header {0}")]
     CouldNotFormCertificate(HeaderDigest),
@@ -83,6 +105,9 @@ pub enum DagError {
 
     #[error("Parents of header {0} are not a quorum")]
     HeaderRequiresQuorum(HeaderDigest),
+
+    #[error("Too many parents in RequestVoteRequest {0} > {1}")]
+    TooManyParents(usize, usize),
 
     #[error("Message {0} (round {1}) too old for GC round {2}")]
     TooOld(Digest<{ crypto::DIGEST_LENGTH }>, Round, Round),
@@ -137,4 +162,19 @@ impl<T> From<tokio::sync::mpsc::error::TrySendError<T>> for DagError {
             tokio::sync::mpsc::error::TrySendError::Closed(_) => DagError::ShuttingDown,
         }
     }
+}
+
+#[derive(Clone, Debug, Error)]
+pub enum LocalClientError {
+    #[error("Primary {0} has not started yet.")]
+    PrimaryNotStarted(PeerId),
+
+    #[error("Worker {0} has not started yet.")]
+    WorkerNotStarted(PeerId),
+
+    #[error("Handler encountered internal error {0}.")]
+    Internal(String),
+
+    #[error("Narwhal is shutting down.")]
+    ShuttingDown,
 }

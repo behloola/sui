@@ -11,10 +11,15 @@ use std::sync::Arc;
 pub struct CheckpointExecutorMetrics {
     pub checkpoint_exec_sync_tps: IntGauge,
     pub last_executed_checkpoint: IntGauge,
+    pub last_executed_checkpoint_timestamp_ms: IntGauge,
     pub checkpoint_exec_errors: IntCounter,
     pub checkpoint_exec_epoch: IntGauge,
+    pub checkpoint_exec_inflight: IntGauge,
+    pub checkpoint_exec_latency_us: Histogram,
+    pub checkpoint_prepare_latency_us: Histogram,
     pub checkpoint_transaction_count: Histogram,
     pub checkpoint_contents_age_ms: Histogram,
+    pub last_executed_checkpoint_age_ms: Histogram,
     pub accumulator_inconsistent_state: IntGauge,
 }
 
@@ -33,6 +38,12 @@ impl CheckpointExecutorMetrics {
                 registry
             )
             .unwrap(),
+            last_executed_checkpoint_timestamp_ms: register_int_gauge_with_registry!(
+                "last_executed_checkpoint_timestamp_ms",
+                "Last executed checkpoint timestamp ms",
+                registry
+            )
+            .unwrap(),
             checkpoint_exec_errors: register_int_counter_with_registry!(
                 "checkpoint_exec_errors",
                 "Checkpoint execution errors count",
@@ -45,6 +56,22 @@ impl CheckpointExecutorMetrics {
                 registry
             )
             .unwrap(),
+            checkpoint_exec_inflight: register_int_gauge_with_registry!(
+                "checkpoint_exec_inflight",
+                "Current number of inflight checkpoints being executed",
+                registry
+            )
+            .unwrap(),
+            checkpoint_exec_latency_us: Histogram::new_in_registry(
+                "checkpoint_exec_latency_us",
+                "Latency of executing a checkpoint from enqueue to all effects available, in microseconds",
+                registry,
+            ),
+            checkpoint_prepare_latency_us: Histogram::new_in_registry(
+                "checkpoint_prepare_latency_us",
+                "Latency of preparing a checkpoint to enqueue for execution, in microseconds",
+                registry,
+            ),
             checkpoint_transaction_count: Histogram::new_in_registry(
                 "checkpoint_transaction_count",
                 "Number of transactions in the checkpoint",
@@ -54,6 +81,11 @@ impl CheckpointExecutorMetrics {
                 "checkpoint_contents_age_ms",
                 "Age of checkpoints when they arrive for execution",
                 registry,
+            ),
+            last_executed_checkpoint_age_ms: Histogram::new_in_registry(
+                "last_executed_checkpoint_age_ms",
+                "Age of the last executed checkpoint",
+                registry
             ),
             accumulator_inconsistent_state: register_int_gauge_with_registry!(
                 "accumulator_inconsistent_state",

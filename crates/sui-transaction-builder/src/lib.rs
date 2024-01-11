@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::result::Result;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -10,13 +9,13 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, ensure, Ok};
 use async_trait::async_trait;
 use futures::future::join_all;
-use move_binary_format::{file_format::SignatureToken, file_format_common::VERSION_MAX};
+use move_binary_format::binary_views::BinaryIndexedView;
+use move_binary_format::file_format::SignatureToken;
+use move_binary_format::file_format_common::VERSION_MAX;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{StructTag, TypeTag};
 
-use sui_adapter::adapter::{resolve_and_type_check, CheckCallArg};
-use sui_adapter::execution_mode::ExecutionMode;
-use sui_json::{resolve_move_function_args, ResolvedCallArg, SuiJsonValue};
+use sui_json::{is_receiving_argument, resolve_move_function_args, ResolvedCallArg, SuiJsonValue};
 use sui_json_rpc_types::{
     RPCTransactionRequestParams, SuiData, SuiObjectDataOptions, SuiObjectResponse, SuiRawData,
     SuiTypeTag,
@@ -26,17 +25,14 @@ use sui_types::base_types::{ObjectID, ObjectInfo, ObjectRef, ObjectType, SuiAddr
 use sui_types::error::UserInputError;
 use sui_types::gas_coin::GasCoin;
 use sui_types::governance::{ADD_STAKE_MUL_COIN_FUN_NAME, WITHDRAW_STAKE_FUN_NAME};
-use sui_types::messages::{
-    Argument, CallArg, Command, InputObjectKind, ObjectArg, TransactionData, TransactionKind,
-};
 use sui_types::move_package::MovePackage;
 use sui_types::object::{Object, Owner};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::sui_system_state::SUI_SYSTEM_MODULE_NAME;
-use sui_types::{
-    coin, fp_ensure, SUI_FRAMEWORK_OBJECT_ID, SUI_SYSTEM_PACKAGE_ID, SUI_SYSTEM_STATE_OBJECT_ID,
-    SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
+use sui_types::transaction::{
+    Argument, CallArg, Command, InputObjectKind, ObjectArg, TransactionData, TransactionKind,
 };
+use sui_types::{coin, fp_ensure, SUI_FRAMEWORK_PACKAGE_ID, SUI_SYSTEM_PACKAGE_ID};
 
 #[async_trait]
 pub trait DataReader {
@@ -56,14 +52,11 @@ pub trait DataReader {
 }
 
 #[derive(Clone)]
-pub struct TransactionBuilder<Mode: ExecutionMode>(
-    Arc<dyn DataReader + Sync + Send>,
-    PhantomData<Mode>,
-);
+pub struct TransactionBuilder(Arc<dyn DataReader + Sync + Send>);
 
-impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
+impl TransactionBuilder {
     pub fn new(data_reader: Arc<dyn DataReader + Sync + Send>) -> Self {
-        Self(data_reader, PhantomData)
+        Self(data_reader)
     }
 
     async fn select_gas(
@@ -74,11 +67,13 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
         input_objects: Vec<ObjectID>,
         gas_price: u64,
     ) -> Result<ObjectRef, anyhow::Error> {
+        if budget < gas_price {
+            bail!("Gas budget {budget} is less than the reference gas price {gas_price}. The gas budget must be at least the current reference gas price of {gas_price}.")
+        }
         if let Some(gas) = input_gas {
             self.get_object_ref(gas).await
         } else {
             let gas_objs = self.0.get_owned_objects(signer, GasCoin::type_()).await?;
-            let required_gas_amount = (budget as u128) * (gas_price as u128);
 
             for obj in gas_objs {
                 let response = self
@@ -94,13 +89,11 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
                         .ok_or_else(|| anyhow!("Cannot parse move object to gas object"))?
                         .bcs_bytes,
                 )?;
-                if !input_objects.contains(&obj.object_id)
-                    && (gas.value() as u128) >= required_gas_amount
-                {
+                if !input_objects.contains(&obj.object_id) && gas.value() >= budget {
                     return Ok(obj.object_ref());
                 }
             }
-            Err(anyhow!("Cannot find gas coin for signer address [{signer}] with amount sufficient for the required gas amount [{required_gas_amount}]."))
+            Err(anyhow!("Cannot find gas coin for signer address [{signer}] with amount sufficient for the required gas amount [{budget}]."))
         }
     }
 
@@ -333,7 +326,9 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
         &self,
         id: ObjectID,
         objects: &mut BTreeMap<ObjectID, Object>,
-        expected_type: SignatureToken,
+        is_mutable_ref: bool,
+        view: &BinaryIndexedView<'_>,
+        arg_type: &SignatureToken,
     ) -> Result<ObjectArg, anyhow::Error> {
         let response = self
             .0
@@ -344,13 +339,16 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
         let obj_ref = obj.compute_object_reference();
         let owner = obj.owner;
         objects.insert(id, obj);
+        if is_receiving_argument(view, arg_type) {
+            return Ok(ObjectArg::Receiving(obj_ref));
+        }
         Ok(match owner {
             Owner::Shared {
                 initial_shared_version,
             } => ObjectArg::SharedObject {
                 id,
                 initial_shared_version,
-                mutable: matches!(expected_type, SignatureToken::MutableReference(_)),
+                mutable: is_mutable_ref,
             },
             Owner::AddressOwner(_) | Owner::ObjectOwner(_) | Owner::Immutable => {
                 ObjectArg::ImmOrOwnedObject(obj_ref)
@@ -373,7 +371,10 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
             .await?
             .into_object()?;
         let Some(SuiRawData::Package(package)) = object.bcs else {
-            bail!("Bcs field in object [{}] is missing or not a package.", package_id);
+            bail!(
+                "Bcs field in object [{}] is missing or not a package.",
+                package_id
+            );
         };
         let package: MovePackage = MovePackage::new(
             package.id,
@@ -390,47 +391,48 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
             function.clone(),
             type_args,
             json_args,
-            Mode::allow_arbitrary_function_calls(),
         )?;
-        let mut check_args = Vec::new();
+
+        let mut args = Vec::new();
         let mut objects = BTreeMap::new();
+        let module = package.deserialize_module(module, VERSION_MAX, true)?;
+        let view = BinaryIndexedView::Module(&module);
         for (arg, expected_type) in json_args_and_tokens {
-            check_args.push(match arg {
-                ResolvedCallArg::Object(id) => CheckCallArg::Object(
-                    self.get_object_arg(id, &mut objects, expected_type).await?,
-                ),
-                ResolvedCallArg::Pure(p) => CheckCallArg::Pure(p),
+            args.push(match arg {
+                ResolvedCallArg::Pure(p) => builder.input(CallArg::Pure(p)),
+
+                ResolvedCallArg::Object(id) => builder.input(CallArg::Object(
+                    self.get_object_arg(
+                        id,
+                        &mut objects,
+                        // Is mutable if passed by mutable reference or by value
+                        matches!(expected_type, SignatureToken::MutableReference(_))
+                            || !expected_type.is_reference(),
+                        &view,
+                        &expected_type,
+                    )
+                    .await?,
+                )),
+
                 ResolvedCallArg::ObjVec(v) => {
                     let mut object_ids = vec![];
                     for id in v {
                         object_ids.push(
-                            self.get_object_arg(id, &mut objects, expected_type.clone())
-                                .await?,
-                        );
+                            self.get_object_arg(
+                                id,
+                                &mut objects,
+                                /* is_mutable_ref */ false,
+                                &view,
+                                &expected_type,
+                            )
+                            .await?,
+                        )
                     }
-                    CheckCallArg::ObjVec(object_ids)
+                    builder.make_obj_vec(object_ids)
                 }
-            })
+            }?);
         }
-        let compiled_module = package.deserialize_module(module, VERSION_MAX)?;
 
-        // TODO set the Mode from outside?
-        resolve_and_type_check::<Mode>(
-            &objects,
-            &compiled_module,
-            function,
-            type_args,
-            check_args.clone(),
-            false,
-        )?;
-        let args = check_args
-            .into_iter()
-            .map(|check_arg| match check_arg {
-                CheckCallArg::Pure(bytes) => builder.input(CallArg::Pure(bytes)),
-                CheckCallArg::Object(obj) => builder.input(CallArg::Object(obj)),
-                CheckCallArg::ObjVec(objs) => builder.make_obj_vec(objs),
-            })
-            .collect::<Result<_, _>>()?;
         Ok(args)
     }
 
@@ -518,7 +520,7 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
 
         TransactionData::new_move_call(
             signer,
-            SUI_FRAMEWORK_OBJECT_ID,
+            SUI_FRAMEWORK_PACKAGE_ID,
             coin::PAY_MODULE_NAME.to_owned(),
             coin::PAY_SPLIT_VEC_FUNC_NAME.to_owned(),
             type_args,
@@ -556,7 +558,7 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
 
         TransactionData::new_move_call(
             signer,
-            SUI_FRAMEWORK_OBJECT_ID,
+            SUI_FRAMEWORK_PACKAGE_ID,
             coin::PAY_MODULE_NAME.to_owned(),
             coin::PAY_SPLIT_N_FUNC_NAME.to_owned(),
             type_args,
@@ -601,7 +603,7 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
 
         TransactionData::new_move_call(
             signer,
-            SUI_FRAMEWORK_OBJECT_ID,
+            SUI_FRAMEWORK_PACKAGE_ID,
             coin::PAY_MODULE_NAME.to_owned(),
             coin::PAY_JOIN_FUNC_NAME.to_owned(),
             type_args,
@@ -692,8 +694,8 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
             .ok_or_else(|| anyhow!("Coins input should contain at lease one coin object."))?;
         let (oref, coin_type) = self.get_object_ref_and_type(coin).await?;
 
-        let ObjectType::Struct(type_) = &coin_type else{
-            return Err(anyhow!("Provided object [{coin}] is not a move object."))
+        let ObjectType::Struct(type_) = &coin_type else {
+            return Err(anyhow!("Provided object [{coin}] is not a move object."));
         };
         ensure!(
             type_.is_coin(),
@@ -713,13 +715,7 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
         let pt = {
             let mut builder = ProgrammableTransactionBuilder::new();
             let arguments = vec![
-                builder
-                    .input(CallArg::Object(ObjectArg::SharedObject {
-                        id: SUI_SYSTEM_STATE_OBJECT_ID,
-                        initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                        mutable: true,
-                    }))
-                    .unwrap(),
+                builder.input(CallArg::SUI_SYSTEM_MUT).unwrap(),
                 builder.make_obj_vec(obj_vec)?,
                 builder
                     .input(CallArg::Pure(bcs::to_bytes(&amount)?))
@@ -766,11 +762,7 @@ impl<Mode: ExecutionMode> TransactionBuilder<Mode> {
             vec![],
             gas,
             vec![
-                CallArg::Object(ObjectArg::SharedObject {
-                    id: SUI_SYSTEM_STATE_OBJECT_ID,
-                    initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                    mutable: true,
-                }),
+                CallArg::SUI_SYSTEM_MUT,
                 CallArg::Object(ObjectArg::ImmOrOwnedObject(staked_sui)),
             ],
             gas_budget,

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use camino::Utf8PathBuf;
-use sui_config::genesis::Builder;
-use sui_config::utils;
-use sui_config::ValidatorInfo;
+use sui_config::local_ip_utils;
+use sui_genesis_builder::validator_info::ValidatorInfo;
+use sui_genesis_builder::Builder;
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::{
     generate_proof_of_possession, get_key_pair_from_rng, AccountKeyPair, AuthorityKeyPair,
@@ -29,12 +29,12 @@ async fn main() {
             worker_key: worker_key.public().clone(),
             account_address: SuiAddress::from(account_key.public()),
             network_key: network_key.public().clone(),
-            gas_price: 1,
-            commission_rate: 0,
-            network_address: utils::new_tcp_network_address(),
-            p2p_address: utils::new_udp_network_address(),
-            narwhal_primary_address: utils::new_udp_network_address(),
-            narwhal_worker_address: utils::new_udp_network_address(),
+            gas_price: sui_config::node::DEFAULT_VALIDATOR_GAS_PRICE,
+            commission_rate: sui_config::node::DEFAULT_COMMISSION_RATE,
+            network_address: local_ip_utils::new_local_tcp_address_for_testing(),
+            p2p_address: local_ip_utils::new_local_udp_address_for_testing(),
+            narwhal_primary_address: local_ip_utils::new_local_udp_address_for_testing(),
+            narwhal_worker_address: local_ip_utils::new_local_udp_address_for_testing(),
             description: String::new(),
             image_url: String::new(),
             project_url: String::new(),

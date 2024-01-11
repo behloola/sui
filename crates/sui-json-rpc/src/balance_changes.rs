@@ -1,49 +1,80 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Neg;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use move_core_types::language_storage::TypeTag;
 use tokio::sync::RwLock;
 
-use sui_core::authority::AuthorityState;
 use sui_json_rpc_types::BalanceChange;
-use sui_types::base_types::{MoveObjectType, ObjectID, ObjectRef, SequenceNumber};
+use sui_types::base_types::{ObjectID, ObjectRef, SequenceNumber};
 use sui_types::coin::Coin;
-use sui_types::error::SuiError;
+use sui_types::digests::ObjectDigest;
+use sui_types::effects::{TransactionEffects, TransactionEffectsAPI};
+use sui_types::execution_status::ExecutionStatus;
 use sui_types::gas_coin::GAS;
-use sui_types::messages::TransactionEffectsAPI;
-use sui_types::messages::{ExecutionStatus, TransactionEffects};
 use sui_types::object::{Object, Owner};
 use sui_types::storage::WriteKind;
+use sui_types::transaction::InputObjectKind;
 
 pub async fn get_balance_changes_from_effect<P: ObjectProvider<Error = E>, E>(
     object_provider: &P,
     effects: &TransactionEffects,
+    input_objs: Vec<InputObjectKind>,
+    mocked_coin: Option<ObjectID>,
 ) -> Result<Vec<BalanceChange>, E> {
     let (_, gas_owner) = effects.gas_object();
 
     // Only charge gas when tx fails, skip all object parsing
     if effects.status() != &ExecutionStatus::Success {
         return Ok(vec![BalanceChange {
-            owner: *gas_owner,
+            owner: gas_owner,
             coin_type: GAS::type_tag(),
             amount: effects.gas_cost_summary().net_gas_usage().neg() as i128,
         }]);
     }
 
-    let all_mutated: Vec<(&ObjectRef, &Owner, WriteKind)> = effects.all_changed_objects();
-    let all_mutated = all_mutated
-        .iter()
-        .map(|((id, version, _), _, _)| (*id, *version))
+    let all_mutated = effects
+        .all_changed_objects()
+        .into_iter()
+        .filter_map(|((id, version, digest), _, _)| {
+            if matches!(mocked_coin, Some(coin) if id == coin) {
+                return None;
+            }
+            Some((id, version, Some(digest)))
+        })
         .collect::<Vec<_>>();
 
+    let input_objs_to_digest = input_objs
+        .iter()
+        .filter_map(|k| match k {
+            InputObjectKind::ImmOrOwnedMoveObject(o) => Some((o.0, o.2)),
+            InputObjectKind::MovePackage(_) | InputObjectKind::SharedMoveObject { .. } => None,
+        })
+        .collect::<HashMap<ObjectID, ObjectDigest>>();
+    let unwrapped_then_deleted = effects
+        .unwrapped_then_deleted()
+        .iter()
+        .map(|e| e.0)
+        .collect::<HashSet<_>>();
     get_balance_changes(
         object_provider,
-        effects.modified_at_versions(),
+        &effects
+            .modified_at_versions()
+            .into_iter()
+            .filter_map(|(id, version)| {
+                if matches!(mocked_coin, Some(coin) if id == coin) {
+                    return None;
+                }
+                // We won't be able to get dynamic object from object provider today
+                if unwrapped_then_deleted.contains(&id) {
+                    return None;
+                }
+                Some((id, version, input_objs_to_digest.get(&id).cloned()))
+            })
+            .collect::<Vec<_>>(),
         &all_mutated,
     )
     .await
@@ -51,8 +82,8 @@ pub async fn get_balance_changes_from_effect<P: ObjectProvider<Error = E>, E>(
 
 pub async fn get_balance_changes<P: ObjectProvider<Error = E>, E>(
     object_provider: &P,
-    modified_at_version: &[(ObjectID, SequenceNumber)],
-    all_mutated: &[(ObjectID, SequenceNumber)],
+    modified_at_version: &[(ObjectID, SequenceNumber, Option<ObjectDigest>)],
+    all_mutated: &[(ObjectID, SequenceNumber, Option<ObjectDigest>)],
 ) -> Result<Vec<BalanceChange>, E> {
     // 1. subtract all input coins
     let balances = fetch_coins(object_provider, modified_at_version)
@@ -91,28 +122,30 @@ pub async fn get_balance_changes<P: ObjectProvider<Error = E>, E>(
 
 async fn fetch_coins<P: ObjectProvider<Error = E>, E>(
     object_provider: &P,
-    objects: &[(ObjectID, SequenceNumber)],
+    objects: &[(ObjectID, SequenceNumber, Option<ObjectDigest>)],
 ) -> Result<Vec<(Owner, TypeTag, u64)>, E> {
     let mut all_mutated_coins = vec![];
-    for (id, version) in objects {
+    for (id, version, digest_opt) in objects {
         // TODO: use multi get object
-        if let Ok(o) = object_provider.get_object(id, version).await {
-            if let Some(type_) = o.type_() {
-                match type_ {
-                    MoveObjectType::GasCoin => all_mutated_coins.push((
-                        o.owner,
-                        GAS::type_tag(),
-                        // we know this is a coin, safe to unwrap
-                        Coin::extract_balance_if_coin(&o).unwrap().unwrap(),
-                    )),
-                    MoveObjectType::Coin(coin_type) => all_mutated_coins.push((
-                        o.owner,
-                        coin_type.clone(),
-                        // we know this is a coin, safe to unwrap
-                        Coin::extract_balance_if_coin(&o).unwrap().unwrap(),
-                    )),
-                    _ => {}
+        let o = object_provider.get_object(id, version).await?;
+        if let Some(type_) = o.type_() {
+            if type_.is_coin() {
+                if let Some(digest) = digest_opt {
+                    // TODO: can we return Err here instead?
+                    assert_eq!(
+                        *digest,
+                        o.digest(),
+                        "Object digest mismatch--got bad data from object_provider?"
+                    )
                 }
+                let [coin_type]: [TypeTag; 1] =
+                    type_.clone().into_type_params().try_into().unwrap();
+                all_mutated_coins.push((
+                    o.owner,
+                    coin_type,
+                    // we know this is a coin, safe to unwrap
+                    Coin::extract_balance_if_coin(&o).unwrap().unwrap(),
+                ))
             }
         }
     }
@@ -132,29 +165,6 @@ pub trait ObjectProvider {
         id: &ObjectID,
         version: &SequenceNumber,
     ) -> Result<Option<Object>, Self::Error>;
-}
-
-#[async_trait]
-impl ObjectProvider for Arc<AuthorityState> {
-    type Error = SuiError;
-    async fn get_object(
-        &self,
-        id: &ObjectID,
-        version: &SequenceNumber,
-    ) -> Result<Object, Self::Error> {
-        Ok(self
-            .get_past_object_read(id, *version)
-            .await?
-            .into_object()?)
-    }
-
-    async fn find_object_lt_or_eq_version(
-        &self,
-        id: &ObjectID,
-        version: &SequenceNumber,
-    ) -> Result<Option<Object>, Self::Error> {
-        Ok(self.database.find_object_lt_or_eq_version(*id, *version))
-    }
 }
 
 pub struct ObjectProviderCache<P> {

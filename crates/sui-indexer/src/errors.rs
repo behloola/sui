@@ -10,12 +10,34 @@ use sui_types::base_types::ObjectIDParseError;
 use sui_types::error::{SuiError, SuiObjectResponseError, UserInputError};
 
 #[derive(Debug, Error)]
+pub struct DataDownloadError {
+    pub error: IndexerError,
+    pub next_checkpoint_sequence_number: u64,
+}
+
+impl std::fmt::Display for DataDownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "next_checkpoint_seq: {}, error: {}",
+            self.next_checkpoint_sequence_number, self.error
+        )
+    }
+}
+
+#[derive(Debug, Error)]
 pub enum IndexerError {
     #[error("Indexer failed to convert timestamp to NaiveDateTime with error: `{0}`")]
     DateTimeParsingError(String),
 
     #[error("Indexer failed to deserialize event from events table with error: `{0}`")]
     EventDeserializationError(String),
+
+    #[error("Fullnode returns unexpected responses, which may block indexers from proceeding, with error: `{0}`")]
+    UnexpectedFullnodeResponseError(String),
+
+    #[error("Indexer failed to transform data with error: `{0}`")]
+    DataTransformationError(String),
 
     #[error("Indexer failed to read fullnode with error: `{0}`")]
     FullNodeReadingError(String),
@@ -47,20 +69,35 @@ pub enum IndexerError {
     #[error(transparent)]
     PostgresError(#[from] diesel::result::Error),
 
-    #[error("Indexer failed to initialize fullnode RPC client with error: `{0}`")]
-    RpcClientInitError(String),
+    #[error("Indexer failed to initialize fullnode Http client with error: `{0}`")]
+    HttpClientInitError(String),
 
     #[error("Indexer failed to serialize/deserialize with error: `{0}`")]
     SerdeError(String),
 
-    #[error("Indexer does not support the feature yet with error: `{0}`")]
-    NotImplementedError(String),
+    #[error("Indexer error related to dynamic field: `{0}`")]
+    DynamicFieldError(String),
+
+    #[error("Indexer does not support the feature with error: `{0}`")]
+    NotSupportedError(String),
+
+    #[error("Indexer read corrupted/incompatible data from persistent storage: `{0}`")]
+    PersistentStorageDataCorruptionError(String),
+
+    #[error("Indexer generic error: `{0}`")]
+    GenericError(String),
+
+    #[error("Indexer failed to resolve object to move struct with error: `{0}`")]
+    ResolveMoveStructError(String),
 
     #[error(transparent)]
     UncategorizedError(#[from] anyhow::Error),
 
     #[error(transparent)]
     ObjectIdParseError(#[from] ObjectIDParseError),
+
+    #[error("Invalid transaction digest with error: `{0}`")]
+    InvalidTransactionDigestError(String),
 
     #[error(transparent)]
     SuiError(#[from] SuiError),
@@ -74,6 +111,9 @@ pub enum IndexerError {
     #[error(transparent)]
     UserInputError(#[from] UserInputError),
 
+    #[error("Indexer failed to resolve module with error: `{0}`")]
+    ModuleResolutionError(String),
+
     #[error(transparent)]
     ObjectResponseError(#[from] SuiObjectResponseError),
 
@@ -82,6 +122,9 @@ pub enum IndexerError {
 
     #[error("`{0}`: `{1}`")]
     ErrorWithContext(String, Box<IndexerError>),
+
+    #[error("Indexer failed to send item to channel with error: `{0}`")]
+    MpscChannelError(String),
 }
 
 pub trait Context<T> {
@@ -97,5 +140,11 @@ impl<T> Context<T> for Result<T, IndexerError> {
 impl From<IndexerError> for RpcError {
     fn from(e: IndexerError) -> Self {
         RpcError::Call(CallError::Failed(e.into()))
+    }
+}
+
+impl From<tokio::task::JoinError> for IndexerError {
+    fn from(value: tokio::task::JoinError) -> Self {
+        IndexerError::UncategorizedError(anyhow::Error::from(value))
     }
 }

@@ -1,7 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+};
 
 use diesel::deserialize::FromSql;
 use diesel::pg::{Pg, PgValue};
@@ -13,14 +16,17 @@ use diesel_derive_enum::DbEnum;
 use fastcrypto::encoding::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::hash_map::Entry;
 
 use move_bytecode_utils::module_cache::GetModule;
 use sui_json_rpc_types::{SuiObjectData, SuiObjectRef, SuiRawData};
-use sui_types::base_types::{EpochId, ObjectID, ObjectRef, ObjectType, SequenceNumber, SuiAddress};
 use sui_types::digests::TransactionDigest;
-use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::move_package::MovePackage;
-use sui_types::object::{Data, MoveObject, ObjectFormatOptions, ObjectRead, Owner};
+use sui_types::object::{Data, MoveObject, ObjectRead, Owner};
+use sui_types::{
+    base_types::{ObjectID, ObjectRef, ObjectType, SequenceNumber, SuiAddress},
+    storage::WriteKind,
+};
 
 use crate::errors::IndexerError;
 use crate::models::owners::OwnerType;
@@ -37,7 +43,9 @@ const OBJECT: &str = "object";
 pub struct Object {
     // epoch id in which this object got update.
     pub epoch: i64,
-    // checkpoint seq number in which this object got update.
+    // checkpoint seq number in which this object got updated,
+    // it can be temp -1 for object updates from fast path,
+    // it will be updated to the real checkpoint seq number in the following checkpoint.
     pub checkpoint: i64,
     pub object_id: String,
     pub version: i64,
@@ -74,7 +82,7 @@ pub struct DeletedObject {
     // epoch id in which this object got deleted.
     pub epoch: i64,
     // checkpoint seq number in which this object got deleted.
-    pub checkpoint: i64,
+    pub checkpoint: Option<i64>,
     pub object_id: String,
     pub version: i64,
     pub object_digest: String,
@@ -89,7 +97,8 @@ impl From<DeletedObject> for Object {
     fn from(o: DeletedObject) -> Self {
         Object {
             epoch: o.epoch,
-            checkpoint: o.checkpoint,
+            // NOTE: -1 as temp checkpoint for object updates from fast path,
+            checkpoint: o.checkpoint.unwrap_or(-1),
             object_id: o.object_id,
             version: o.version,
             object_digest: o.object_digest,
@@ -118,10 +127,61 @@ pub enum ObjectStatus {
     UnwrappedThenDeleted,
 }
 
+impl From<WriteKind> for ObjectStatus {
+    fn from(value: WriteKind) -> Self {
+        match value {
+            WriteKind::Mutate => Self::Mutated,
+            WriteKind::Create => Self::Created,
+            WriteKind::Unwrap => Self::Unwrapped,
+        }
+    }
+}
+
 impl Object {
+    pub fn new(
+        epoch: u64,
+        checkpoint: u64,
+        kind: WriteKind,
+        object: &sui_types::object::Object,
+    ) -> Self {
+        let (owner_type, owner_address, initial_shared_version) =
+            owner_to_owner_info(&object.owner);
+
+        let has_public_transfer = object
+            .data
+            .try_as_move()
+            .map(|o| o.has_public_transfer())
+            .unwrap_or(false);
+        let object_type = object
+            .data
+            .try_as_move()
+            .map(|o| o.type_().to_string())
+            .unwrap_or_else(|| "".to_owned());
+
+        Self {
+            epoch: epoch as i64,
+            checkpoint: checkpoint as i64,
+            object_id: object.id().to_string(),
+            version: object.version().value() as i64,
+            object_digest: object.digest().to_string(),
+            owner_type,
+            owner_address,
+            initial_shared_version,
+            previous_transaction: object.previous_transaction.to_string(),
+            object_type,
+            object_status: kind.into(),
+            has_public_transfer,
+            storage_rebate: object.storage_rebate as i64,
+            bcs: vec![NamedBcsBytes(
+                OBJECT.to_string(),
+                bcs::to_bytes(object).unwrap(),
+            )],
+        }
+    }
+
     pub fn from(
-        epoch: &EpochId,
-        checkpoint: &CheckpointSequenceNumber,
+        epoch: u64,
+        checkpoint: Option<u64>,
         status: &ObjectStatus,
         o: &SuiObjectData,
     ) -> Self {
@@ -144,8 +204,9 @@ impl Object {
             };
 
         Object {
-            epoch: *epoch as i64,
-            checkpoint: *checkpoint as i64,
+            epoch: epoch as i64,
+            // NOTE: -1 as temp checkpoint for object updates from fast path,
+            checkpoint: checkpoint.map(|v| v as i64).unwrap_or(-1),
             object_id: o.object_id.to_string(),
             version: o.version.value() as i64,
             object_digest: o.digest.base58_encode(),
@@ -179,7 +240,7 @@ impl Object {
             _ => {
                 let oref = self.get_object_ref()?;
                 let object: sui_types::object::Object = self.try_into()?;
-                let layout = object.get_layout(ObjectFormatOptions::default(), module_cache)?;
+                let layout = object.get_layout(module_cache)?;
                 ObjectRead::Exists(oref, object, layout)
             }
         })
@@ -242,12 +303,13 @@ impl TryFrom<Object> for sui_types::object::Object {
                     BTreeMap::new(),
                 )
                 .unwrap();
-                sui_types::object::Object {
+                sui_types::object::ObjectInner {
                     data: Data::Package(package),
                     owner,
                     previous_transaction,
                     storage_rebate: o.storage_rebate as u64,
                 }
+                .into()
             }
             // Reconstructing MoveObject form database table, move VM safety concern is irrelevant here.
             ObjectType::Struct(object_type) => unsafe {
@@ -267,12 +329,13 @@ impl TryFrom<Object> for sui_types::object::Object {
                 )
                 .unwrap();
 
-                sui_types::object::Object {
+                sui_types::object::ObjectInner {
                     data: Data::Move(object),
                     owner,
                     previous_transaction,
                     storage_rebate: o.storage_rebate as u64,
                 }
+                .into()
             },
         })
     }
@@ -280,15 +343,15 @@ impl TryFrom<Object> for sui_types::object::Object {
 
 impl DeletedObject {
     pub fn from(
-        epoch: &EpochId,
-        checkpoint: &CheckpointSequenceNumber,
+        epoch: u64,
+        checkpoint: Option<u64>,
         oref: &SuiObjectRef,
         previous_tx: &TransactionDigest,
-        status: ObjectStatus,
+        status: &ObjectStatus,
     ) -> Self {
         Self {
-            epoch: *epoch as i64,
-            checkpoint: *checkpoint as i64,
+            epoch: epoch as i64,
+            checkpoint: checkpoint.map(|c| c as i64),
             object_id: oref.object_id.to_string(),
             version: oref.version.value() as i64,
             // DeleteObject is use for upsert only, this value will not be inserted into the DB
@@ -297,7 +360,7 @@ impl DeletedObject {
             owner_type: OwnerType::AddressOwner,
             previous_transaction: previous_tx.base58_encode(),
             object_type: "DELETED".to_string(),
-            object_status: status,
+            object_status: *status,
             has_public_transfer: false,
         }
     }
@@ -439,4 +502,25 @@ pub fn compose_object_bulk_insert_query(objects: &[Object]) -> String {
         rows_query
     );
     bulk_insert_query
+}
+
+pub fn filter_latest_objects(objects: Vec<Object>) -> Vec<Object> {
+    // Transactions in checkpoint are ordered by causal depedencies.
+    // But HashMap is not a lot more costly than HashSet, and it
+    // may be good to still keep the relative order of objects in
+    // the checkpoint.
+    let mut latest_objects = HashMap::new();
+    for object in objects {
+        match latest_objects.entry(object.object_id.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(object);
+            }
+            Entry::Occupied(mut e) => {
+                if object.version > e.get().version {
+                    e.insert(object);
+                }
+            }
+        }
+    }
+    latest_objects.into_values().collect()
 }

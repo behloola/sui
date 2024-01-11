@@ -16,19 +16,8 @@ pub struct WorkerBatchMessage {
     pub batch: Batch,
 }
 
-/// Used by primary to ask worker for the request.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RequestBatchRequest {
-    pub batch: BatchDigest,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RequestBatchResponse {
-    pub batch: Option<Batch>,
-}
-
 /// Used by primary to bulk request batches from workers local store.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestBatchesRequest {
     pub batch_digests: Vec<BatchDigest>,
 }
@@ -41,8 +30,8 @@ pub struct RequestBatchesResponse {
     pub is_size_limit_reached: bool,
 }
 
+// TODO: support propagating errors from the worker to the primary.
 pub type TxResponse = tokio::sync::oneshot::Sender<BatchDigest>;
-pub type PrimaryResponse = Option<tokio::sync::oneshot::Sender<()>>;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]

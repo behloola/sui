@@ -4,18 +4,19 @@
 use std::str::FromStr;
 
 use anyhow::anyhow;
+use move_core_types::annotated_value::{MoveStruct, MoveValue};
 use move_core_types::ident_str;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{StructTag, TypeTag};
-use move_core_types::value::{MoveStruct, MoveValue};
+use serde_json::json;
 
-use sui_types::base_types::SequenceNumber;
+use sui_types::base_types::{ObjectDigest, SequenceNumber};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::gas_coin::GasCoin;
-use sui_types::object::MoveObject;
-use sui_types::{MOVE_STDLIB_ADDRESS, SUI_FRAMEWORK_ADDRESS};
+use sui_types::object::{MoveObject, Owner};
+use sui_types::{parse_sui_struct_tag, MOVE_STDLIB_ADDRESS, SUI_FRAMEWORK_ADDRESS};
 
-use crate::{SuiMoveStruct, SuiMoveValue};
+use crate::{ObjectChange, SuiMoveStruct, SuiMoveValue};
 
 #[test]
 fn test_move_value_to_sui_coin() {
@@ -42,7 +43,7 @@ fn test_move_value_to_string() {
         .map(|u8| MoveValue::U8(*u8))
         .collect::<Vec<_>>();
 
-    let move_value = MoveValue::Struct(MoveStruct::WithTypes {
+    let move_value = MoveValue::Struct(MoveStruct {
         type_: StructTag {
             address: MOVE_STDLIB_ADDRESS,
             module: ident_str!("string").to_owned(),
@@ -60,7 +61,7 @@ fn test_move_value_to_string() {
 #[test]
 fn test_option() {
     // bugfix for https://github.com/MystenLabs/sui/issues/4995
-    let option = MoveValue::Struct(MoveStruct::WithTypes {
+    let option = MoveValue::Struct(MoveStruct {
         type_: StructTag {
             address: MOVE_STDLIB_ADDRESS,
             module: Identifier::from_str("option").unwrap(),
@@ -88,7 +89,7 @@ fn test_move_value_to_url() {
         .map(|u8| MoveValue::U8(*u8))
         .collect::<Vec<_>>();
 
-    let string_move_value = MoveValue::Struct(MoveStruct::WithTypes {
+    let string_move_value = MoveValue::Struct(MoveStruct {
         type_: StructTag {
             address: MOVE_STDLIB_ADDRESS,
             module: ident_str!("string").to_owned(),
@@ -98,7 +99,7 @@ fn test_move_value_to_url() {
         fields: vec![(ident_str!("bytes").to_owned(), MoveValue::Vector(values))],
     });
 
-    let url_move_value = MoveValue::Struct(MoveStruct::WithTypes {
+    let url_move_value = MoveValue::Struct(MoveStruct {
         type_: StructTag {
             address: SUI_FRAMEWORK_ADDRESS,
             module: ident_str!("url").to_owned(),
@@ -116,7 +117,7 @@ fn test_move_value_to_url() {
 #[test]
 fn test_serde() {
     let test_values = [
-        SuiMoveValue::Number(u64::MAX),
+        SuiMoveValue::Number(u32::MAX),
         SuiMoveValue::UID {
             id: ObjectID::random(),
         },
@@ -141,5 +142,57 @@ fn test_serde() {
             "Error converting {:?} [{json}], got {:?}",
             value, serde_value
         )
+    }
+}
+
+#[test]
+fn test_serde_bytearray() {
+    // ensure that we serialize byte arrays as number array
+    let test_values = MoveValue::Vector(vec![MoveValue::U8(1), MoveValue::U8(2), MoveValue::U8(3)]);
+    let sui_move_value = SuiMoveValue::from(test_values);
+    let json = serde_json::to_value(&sui_move_value).unwrap();
+    assert_eq!(json, json!([1, 2, 3]));
+}
+
+#[test]
+fn test_serde_number() {
+    // ensure that we serialize byte arrays as number array
+    let test_values = MoveValue::U8(1);
+    let sui_move_value = SuiMoveValue::from(test_values);
+    let json = serde_json::to_value(&sui_move_value).unwrap();
+    assert_eq!(json, json!(1));
+    let test_values = MoveValue::U16(1);
+    let sui_move_value = SuiMoveValue::from(test_values);
+    let json = serde_json::to_value(&sui_move_value).unwrap();
+    assert_eq!(json, json!(1));
+    let test_values = MoveValue::U32(1);
+    let sui_move_value = SuiMoveValue::from(test_values);
+    let json = serde_json::to_value(&sui_move_value).unwrap();
+    assert_eq!(json, json!(1));
+}
+
+#[test]
+fn test_type_tag_struct_tag_devnet_inc_222() {
+    let offending_tags = [
+        "0x1::address::MyType",
+        "0x1::vector::MyType",
+        "0x1::address::MyType<0x1::address::OtherType>",
+        "0x1::address::MyType<0x1::address::OtherType, 0x1::vector::VecTyper>",
+        "0x1::address::address<0x1::vector::address, 0x1::vector::vector>",
+    ];
+
+    for tag in offending_tags {
+        let oc = ObjectChange::Created {
+            sender: Default::default(),
+            owner: Owner::Immutable,
+            object_type: parse_sui_struct_tag(tag).unwrap(),
+            object_id: ObjectID::random(),
+            version: Default::default(),
+            digest: ObjectDigest::random(),
+        };
+
+        let serde_json = serde_json::to_string(&oc).unwrap();
+        let deser: ObjectChange = serde_json::from_str(&serde_json).unwrap();
+        assert_eq!(oc, deser);
     }
 }

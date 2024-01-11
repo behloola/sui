@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::monitored_scope;
 use futures::FutureExt;
 use parking_lot::Mutex;
 use prometheus::{
@@ -108,7 +109,7 @@ impl HistogramVec {
             register_int_counter_vec_with_registry!(sum_name, desc, labels, registry).unwrap();
         let count =
             register_int_counter_vec_with_registry!(count_name, desc, labels, registry).unwrap();
-        let labels: Vec<_> = labels.iter().cloned().chain(["pct"].into_iter()).collect();
+        let labels: Vec<_> = labels.iter().cloned().chain(["pct"]).collect();
         let gauge = register_int_gauge_vec_with_registry!(name, desc, &labels, registry).unwrap();
         Self::new(gauge, sum, count, percentiles, name)
     }
@@ -176,6 +177,10 @@ impl Hash for HistogramLabelsInner {
 impl Histogram {
     pub fn new_in_registry(name: &str, desc: &str, registry: &Registry) -> Self {
         HistogramVec::new_in_registry(name, desc, &[], registry).with_label_values(&[])
+    }
+
+    pub fn observe(&self, v: Point) {
+        self.report(v)
     }
 
     pub fn report(&self, v: Point) {
@@ -256,6 +261,7 @@ impl HistogramCollector {
 
 impl HistogramReporter {
     pub fn report(&mut self, labeled_data: HashMap<HistogramLabels, Vec<Point>>) {
+        let _scope = monitored_scope("HistogramReporter::report");
         let mut reset_labels = self.known_labels.clone();
         for (label, mut data) in labeled_data {
             self.known_labels.insert(label.clone());

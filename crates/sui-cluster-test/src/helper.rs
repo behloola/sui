@@ -93,6 +93,18 @@ impl ObjectChecker {
             }
             (
                 None,
+                Some(SuiObjectResponseError::DynamicFieldNotFound {
+                    parent_object_id: object_id,
+                }),
+            ) => {
+                panic!(
+                    "Node can't find dynamic field for {} with client {:?}",
+                    object_id,
+                    client.read_api()
+                )
+            }
+            (
+                None,
                 Some(SuiObjectResponseError::Deleted {
                     object_id,
                     version: _,
@@ -130,6 +142,9 @@ impl ObjectChecker {
                     return Ok(CheckerResultObject::new(Some(gas_coin), Some(object)));
                 }
                 Ok(CheckerResultObject::new(None, Some(object)))
+            }
+            (None, Some(SuiObjectResponseError::DisplayError { error })) => {
+                panic!("Display Error: {error:?}");
             }
             (None, None) | (None, Some(SuiObjectResponseError::Unknown)) => {
                 panic!("Unexpected response: object not found and no specific error provided");

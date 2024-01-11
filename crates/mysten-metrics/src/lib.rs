@@ -1,15 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use axum::{extract::Extension, http::StatusCode, routing::get, Router};
 use dashmap::DashMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use once_cell::sync::OnceCell;
-use prometheus::{register_int_gauge_vec_with_registry, IntGaugeVec, Registry};
+use prometheus::{register_int_gauge_vec_with_registry, IntGaugeVec, Registry, TextEncoder};
 use tap::TapFallible;
 use tracing::warn;
 
@@ -18,14 +20,20 @@ use uuid::Uuid;
 
 mod guards;
 pub mod histogram;
+pub mod metered_channel;
 pub use guards::*;
+
+pub const TX_TYPE_SINGLE_WRITER_TX: &str = "single_writer";
+pub const TX_TYPE_SHARED_OBJ_TX: &str = "shared_object";
 
 #[derive(Debug)]
 pub struct Metrics {
     pub tasks: IntGaugeVec,
     pub futures: IntGaugeVec,
+    pub channels: IntGaugeVec,
     pub scope_iterations: IntGaugeVec,
     pub scope_duration_ns: IntGaugeVec,
+    pub scope_entrance: IntGaugeVec,
 }
 
 impl Metrics {
@@ -42,6 +50,20 @@ impl Metrics {
                 "monitored_futures",
                 "Number of pending futures per callsite.",
                 &["callsite"],
+                registry,
+            )
+            .unwrap(),
+            channels: register_int_gauge_vec_with_registry!(
+                "monitored_channels",
+                "Size of channels.",
+                &["name"],
+                registry,
+            )
+            .unwrap(),
+            scope_entrance: register_int_gauge_vec_with_registry!(
+                "monitored_scope_entrance",
+                "Number of entrance in the scope.",
+                &["name"],
                 registry,
             )
             .unwrap(),
@@ -171,6 +193,10 @@ impl Drop for MonitoredScopeGuard {
             .scope_duration_ns
             .with_label_values(&[self.name])
             .add(self.timer.elapsed().as_nanos() as i64);
+        self.metrics
+            .scope_entrance
+            .with_label_values(&[self.name])
+            .dec();
     }
 }
 
@@ -186,6 +212,7 @@ pub fn monitored_scope(name: &'static str) -> Option<MonitoredScopeGuard> {
     let metrics = get_metrics();
     if let Some(m) = metrics {
         m.scope_iterations.with_label_values(&[name]).inc();
+        m.scope_entrance.with_label_values(&[name]).inc();
         Some(MonitoredScopeGuard {
             metrics: m,
             name,
@@ -292,11 +319,19 @@ impl RegistryService {
 }
 
 /// Create a metric that measures the uptime from when this metric was constructed.
-/// The metric is labeled with the provided 'version' label (this should generally be of the
-/// format: 'semver-gitrevision').
-pub fn uptime_metric(version: &'static str) -> Box<dyn prometheus::core::Collector> {
+/// The metric is labeled with:
+/// - 'process': the process type, differentiating between validator and fullnode
+/// - 'version': binary version, generally be of the format: 'semver-gitrevision'
+/// - 'chain_identifier': the identifier of the network which this process is part of
+pub fn uptime_metric(
+    process: &str,
+    version: &'static str,
+    chain_identifier: &str,
+) -> Box<dyn prometheus::core::Collector> {
     let opts = prometheus::opts!("uptime", "uptime of the node service in seconds")
-        .variable_label("version");
+        .variable_label("process")
+        .variable_label("version")
+        .variable_label("chain_identifier");
 
     let start_time = std::time::Instant::now();
     let uptime = move || start_time.elapsed().as_secs();
@@ -304,7 +339,7 @@ pub fn uptime_metric(version: &'static str) -> Box<dyn prometheus::core::Collect
         opts,
         prometheus_closure_metric::ValueType::Counter,
         uptime,
-        &[version],
+        &[process, version, chain_identifier],
     )
     .unwrap();
 
@@ -399,5 +434,49 @@ mod tests {
         let metric_1 = metrics.remove(0);
         assert_eq!(metric_1.get_name(), "sui_counter_2");
         assert_eq!(metric_1.get_help(), "counter_2_desc");
+    }
+}
+
+pub const METRICS_ROUTE: &str = "/metrics";
+
+// Creates a new http server that has as a sole purpose to expose
+// and endpoint that prometheus agent can use to poll for the metrics.
+// A RegistryService is returned that can be used to get access in prometheus Registries.
+pub fn start_prometheus_server(addr: SocketAddr) -> RegistryService {
+    let registry = Registry::new();
+
+    let registry_service = RegistryService::new(registry);
+
+    if cfg!(msim) {
+        // prometheus uses difficult-to-support features such as TcpSocket::from_raw_fd(), so we
+        // can't yet run it in the simulator.
+        warn!("not starting prometheus server in simulator");
+        return registry_service;
+    }
+
+    let app = Router::new()
+        .route(METRICS_ROUTE, get(metrics))
+        .layer(Extension(registry_service.clone()));
+
+    tokio::spawn(async move {
+        axum::Server::bind(&addr)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    registry_service
+}
+
+pub async fn metrics(
+    Extension(registry_service): Extension<RegistryService>,
+) -> (StatusCode, String) {
+    let metrics_families = registry_service.gather_all();
+    match TextEncoder.encode_to_string(&metrics_families) {
+        Ok(metrics) => (StatusCode::OK, metrics),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("unable to encode metrics: {error}"),
+        ),
     }
 }

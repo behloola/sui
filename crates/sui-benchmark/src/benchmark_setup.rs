@@ -1,5 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
+
+use crate::bank::BenchmarkBank;
+use crate::options::Opts;
+use crate::util::get_ed25519_keypair_from_keystore;
+use crate::{FullNodeProxy, LocalValidatorAggregatorProxy, ValidatorProxy};
 use anyhow::{anyhow, bail, Context, Result};
 use prometheus::Registry;
 use rand::seq::SliceRandom;
@@ -7,22 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use sui_config::utils;
-
+use sui_swarm_config::genesis_config::AccountConfig;
+use sui_types::base_types::ConciseableName;
 use sui_types::base_types::ObjectID;
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::{deterministic_random_account_key, AccountKeyPair};
-use tokio::time::sleep;
-
-use crate::bank::BenchmarkBank;
-use crate::options::Opts;
-use crate::util::get_ed25519_keypair_from_keystore;
-use crate::{FullNodeProxy, LocalValidatorAggregatorProxy, ValidatorProxy};
-use sui_types::object::generate_max_test_gas_objects_with_owner;
-use test_utils::authority::test_and_configure_authority_configs_with_objects;
-use test_utils::authority::{spawn_fullnode, spawn_test_authorities};
+use sui_types::gas_coin::TOTAL_SUPPLY_MIST;
+use sui_types::object::Owner;
+use test_cluster::TestClusterBuilder;
 use tokio::runtime::Builder;
 use tokio::sync::{oneshot, Barrier};
+use tokio::time::sleep;
 use tracing::info;
 
 pub enum Env {
@@ -52,7 +52,6 @@ impl Env {
                     barrier,
                     registry,
                     opts.committee_size as usize,
-                    opts.server_metric_port,
                     opts.num_server_threads,
                 )
                 .await
@@ -61,8 +60,7 @@ impl Env {
                 self.setup_remote_env(
                     barrier,
                     registry,
-                    opts.primary_gas_id.as_str(),
-                    opts.primary_gas_objects,
+                    opts.primary_gas_owner_id.as_str(),
                     opts.keystore_path.as_str(),
                     opts.genesis_blob_path.as_str(),
                     opts.use_fullnode_for_reconfig,
@@ -79,46 +77,17 @@ impl Env {
         barrier: Arc<Barrier>,
         registry: &Registry,
         committee_size: usize,
-        server_metric_port: u16,
         num_server_threads: u64,
     ) -> Result<BenchmarkSetup> {
         info!("Running benchmark setup in local mode..");
-        let (address, keypair): (SuiAddress, AccountKeyPair) = deterministic_random_account_key();
-        let generated_gas = generate_max_test_gas_objects_with_owner(2, address);
-        let (mut network_config, generated_gas) =
-            test_and_configure_authority_configs_with_objects(committee_size, generated_gas);
-        let mut metric_port = server_metric_port;
-        for node_config in network_config.validator_configs.iter_mut() {
-            let parameters = &mut node_config
-                .consensus_config
-                .as_mut()
-                .context("Missing consensus config")?
-                .narwhal_config;
-            parameters.batch_size = 12800;
-            node_config.metrics_address = format!("127.0.0.1:{}", metric_port)
-                .parse()
-                .context("Failed to parse metric address")?;
-            metric_port += 1;
-        }
-        let config = Arc::new(network_config);
-        // bring up servers ..
-        let primary_gas = generated_gas
-            .get(0)
-            .context("No gas found at index 0")?
-            .clone();
-        let pay_coin = generated_gas
-            .get(1)
-            .context("No gas found at index 1")?
-            .clone();
-        // Make the client runtime wait until we are done creating genesis objects
-        let cloned_config = config.clone();
-        let fullnode_ip = format!("{}", utils::get_local_ip_for_tests());
-        let fullnode_rpc_port = utils::get_available_port(&fullnode_ip);
-        let fullnode_barrier = Arc::new(Barrier::new(2));
-        let fullnode_barrier_clone = fullnode_barrier.clone();
+        let (primary_gas_owner, keypair): (SuiAddress, AccountKeyPair) =
+            deterministic_random_account_key();
+        let keypair = Arc::new(keypair);
+
         // spawn a thread to spin up sui nodes on the multi-threaded server runtime.
         // running forever
-        let (sender, recv) = tokio::sync::oneshot::channel::<()>();
+        let (shutdown_sender, shutdown_recv) = tokio::sync::oneshot::channel::<()>();
+        let (genesis_sender, genesis_recv) = tokio::sync::oneshot::channel();
         let join_handle = std::thread::spawn(move || {
             // create server runtime
             let server_runtime = Builder::new_multi_thread()
@@ -128,33 +97,46 @@ impl Env {
                 .build()
                 .unwrap();
             server_runtime.block_on(async move {
-                // Setup the network
-                let _validators: Vec<_> = spawn_test_authorities(&cloned_config).await;
-                let _fullnode = spawn_fullnode(&cloned_config, Some(fullnode_rpc_port)).await;
-                fullnode_barrier_clone.wait().await;
+                let cluster = TestClusterBuilder::new()
+                    .with_accounts(vec![AccountConfig {
+                        address: Some(primary_gas_owner),
+                        // We can't use TOTAL_SUPPLY_MIST because we need to account for validator stakes in genesis allocation.
+                        gas_amounts: vec![TOTAL_SUPPLY_MIST / 2],
+                    }])
+                    .with_num_validators(committee_size)
+                    .build()
+                    .await;
+                let genesis = cluster.swarm.config().genesis.clone();
+                for v in cluster.swarm.config().validator_configs() {
+                    eprintln!(
+                        "Metric address for validator {}: {}",
+                        v.protocol_public_key().concise(),
+                        v.metrics_address
+                    );
+                }
+                let primary_gas = cluster
+                    .wallet
+                    .get_one_gas_object_owned_by_address(primary_gas_owner)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                // Send genesis and primary gas object to the main thread.
+                genesis_sender.send((genesis, primary_gas)).unwrap();
                 barrier.wait().await;
-                recv.await.expect("Unable to wait for terminate signal");
+                shutdown_recv
+                    .await
+                    .expect("Unable to wait for terminate signal");
             });
         });
-        // Let fullnode be created.
+        // Wait for the embedded reconfig observer.
         sleep(Duration::from_secs(5)).await;
-        let fullnode_rpc_url = format!("http://{fullnode_ip}:{fullnode_rpc_port}");
-        info!("Fullnode rpc url: {fullnode_rpc_url}");
-        fullnode_barrier.wait().await;
-        let proxy: Arc<dyn ValidatorProxy + Send + Sync> = Arc::new(
-            LocalValidatorAggregatorProxy::from_genesis(&config.genesis, registry, None).await,
-        );
-        let keypair = Arc::new(keypair);
-        let primary_gas = (
-            primary_gas.compute_object_reference(),
-            address,
-            keypair.clone(),
-        );
-        let pay_coin = (pay_coin.compute_object_reference(), address, keypair);
+        let (genesis, primary_gas) = genesis_recv.await.unwrap();
+        let proxy: Arc<dyn ValidatorProxy + Send + Sync> =
+            Arc::new(LocalValidatorAggregatorProxy::from_genesis(&genesis, registry, None).await);
         Ok(BenchmarkSetup {
             server_handle: join_handle,
-            shutdown_notifier: sender,
-            bank: BenchmarkBank::new(proxy.clone(), primary_gas, pay_coin),
+            shutdown_notifier: shutdown_sender,
+            bank: BenchmarkBank::new(proxy.clone(), (primary_gas, primary_gas_owner, keypair)),
             proxies: vec![proxy],
         })
     }
@@ -163,8 +145,7 @@ impl Env {
         &self,
         barrier: Arc<Barrier>,
         registry: &Registry,
-        primary_gas_id: &str,
-        primary_gas_objects: u64,
+        primary_gas_owner_id: &str,
         keystore_path: &str,
         genesis_blob_path: &str,
         use_fullnode_for_reconfig: bool,
@@ -182,6 +163,10 @@ impl Env {
                     recv.await.expect("Unable to wait for terminate signal");
                 });
         });
+
+        let genesis = sui_config::node::Genesis::new_from_file(genesis_blob_path);
+        let genesis = genesis.genesis()?;
+
         let fullnode_rpc_urls = fullnode_rpc_address.clone();
         info!("List of fullnode rpc urls: {:?}", fullnode_rpc_urls);
         let proxies: Vec<Arc<dyn ValidatorProxy + Send + Sync>> = if use_fullnode_for_execution {
@@ -189,9 +174,9 @@ impl Env {
                 bail!("fullnode-rpc-url is required when use-fullnode-for-execution is true");
             }
             let mut fullnodes: Vec<Arc<dyn ValidatorProxy + Send + Sync>> = vec![];
-            for fullnode_rpc_url in fullnode_rpc_urls {
+            for fullnode_rpc_url in fullnode_rpc_urls.iter() {
                 info!("Using FullNodeProxy: {:?}", fullnode_rpc_url);
-                fullnodes.push(Arc::new(FullNodeProxy::from_url(&fullnode_rpc_url).await?));
+                fullnodes.push(Arc::new(FullNodeProxy::from_url(fullnode_rpc_url).await?));
             }
             fullnodes
         } else {
@@ -204,8 +189,6 @@ impl Env {
             } else {
                 None
             };
-            let genesis = sui_config::node::Genesis::new_from_file(genesis_blob_path);
-            let genesis = genesis.genesis()?;
             vec![Arc::new(
                 LocalValidatorAggregatorProxy::from_genesis(
                     genesis,
@@ -223,30 +206,7 @@ impl Env {
             proxy.get_current_epoch(),
         );
 
-        let mut used_ids = vec![];
-        let offset = ObjectID::from_hex_literal(primary_gas_id)?;
-        let ids = ObjectID::in_range(offset, primary_gas_objects)?;
-        let mut primary_gas_id = ids
-            .choose(&mut rand::thread_rng())
-            .context("Failed to choose a random primary gas id")?;
-        while used_ids.contains(primary_gas_id) {
-            primary_gas_id = ids
-                .choose(&mut rand::thread_rng())
-                .context("Failed to choose a random primary gas id")?;
-        }
-        used_ids.push(*primary_gas_id);
-        let primary_gas = proxy.get_object(*primary_gas_id).await?;
-        let mut pay_coin_id = ids
-            .choose(&mut rand::thread_rng())
-            .context("Failed to choose a random pay coin")?;
-        while used_ids.contains(pay_coin_id) {
-            pay_coin_id = ids
-                .choose(&mut rand::thread_rng())
-                .context("Failed to choose a random primary gas id")?;
-        }
-        used_ids.push(*pay_coin_id);
-        let pay_coin = proxy.get_object(*pay_coin_id).await?;
-        let primary_gas_account = primary_gas.owner.get_owner_address()?;
+        let primary_gas_owner_addr = ObjectID::from_hex_literal(primary_gas_owner_id)?;
         let keystore_path = Some(&keystore_path)
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
@@ -256,24 +216,78 @@ impl Env {
                     &keystore_path
                 ))
             })?;
-        let keypair = Arc::new(get_ed25519_keypair_from_keystore(
-            keystore_path,
-            &primary_gas_account,
-        )?);
-        let primary_gas = (
-            primary_gas.compute_object_reference(),
-            primary_gas_account,
-            keypair.clone(),
-        );
-        let pay_coin = (
-            pay_coin.compute_object_reference(),
-            pay_coin.owner.get_owner_address()?,
-            keypair,
-        );
+
+        let current_gas = if use_fullnode_for_execution {
+            // Go through fullnode to get the current gas object.
+            let mut gas_objects = proxy
+                .get_owned_objects(primary_gas_owner_addr.into())
+                .await?;
+            gas_objects.sort_by_key(|&(gas, _)| std::cmp::Reverse(gas));
+
+            // TODO: Merge all owned gas objects into one and use that as the primary gas object.
+            let (balance, primary_gas_obj) = gas_objects
+                .iter()
+                .max_by_key(|(balance, _)| balance)
+                .context(
+                    "Failed to choose the gas object with the largest amount of gas".to_string(),
+                )?;
+
+            info!(
+                "Using primary gas id: {} with balance of {balance}",
+                primary_gas_obj.id()
+            );
+
+            let primary_gas_account = primary_gas_obj.owner.get_owner_address()?;
+
+            let keypair = Arc::new(get_ed25519_keypair_from_keystore(
+                keystore_path,
+                &primary_gas_account,
+            )?);
+
+            (
+                primary_gas_obj.compute_object_reference(),
+                primary_gas_account,
+                keypair,
+            )
+        } else {
+            // Go through local proxy to get the current gas object.
+            let mut genesis_gas_objects = Vec::new();
+
+            for obj in genesis.objects().iter() {
+                let owner = &obj.owner;
+                if let Owner::AddressOwner(addr) = owner {
+                    if *addr == primary_gas_owner_addr.into() {
+                        genesis_gas_objects.push(obj.clone());
+                    }
+                }
+            }
+
+            let genesis_gas_obj = genesis_gas_objects
+                .choose(&mut rand::thread_rng())
+                .context("Failed to choose a random primary gas")?
+                .clone();
+
+            let current_gas_object = proxy.get_object(genesis_gas_obj.id()).await?;
+            let current_gas_account = current_gas_object.owner.get_owner_address()?;
+
+            let keypair = Arc::new(get_ed25519_keypair_from_keystore(
+                keystore_path,
+                &current_gas_account,
+            )?);
+
+            info!("Using primary gas obj: {}", current_gas_object.id());
+
+            (
+                current_gas_object.compute_object_reference(),
+                current_gas_account,
+                keypair,
+            )
+        };
+
         Ok(BenchmarkSetup {
             server_handle: join_handle,
             shutdown_notifier: sender,
-            bank: BenchmarkBank::new(proxy.clone(), primary_gas, pay_coin),
+            bank: BenchmarkBank::new(proxy.clone(), current_gas),
             proxies,
         })
     }

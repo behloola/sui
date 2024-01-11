@@ -4,6 +4,7 @@ pub mod admin;
 pub mod config;
 pub mod consumer;
 pub mod handlers;
+pub mod histogram_relay;
 pub mod metrics;
 pub mod middleware;
 pub mod peers;
@@ -24,7 +25,7 @@ macro_rules! var {
     };
     ($key:expr, $default:expr) => {
         match std::env::var($key) {
-            Ok(val) => val.parse::<usize>().unwrap(),
+            Ok(val) => val.parse::<_>().unwrap(),
             Err(_) => $default,
         }
     };
@@ -33,6 +34,8 @@ macro_rules! var {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::Labels;
+    use crate::histogram_relay::HistogramRelay;
     use crate::prom_to_mimir::tests::*;
 
     use crate::{admin::CertKeyPair, config::RemoteWriteConfig, peers::SuiNodeProvider};
@@ -45,7 +48,7 @@ mod tests {
     use protobuf::RepeatedField;
     use std::net::TcpListener;
     use std::time::Duration;
-    use sui_tls::{CertVerifier, TlsAcceptor, TlsConnectionInfo};
+    use sui_tls::{CertVerifier, TlsAcceptor};
 
     async fn run_dummy_remote_write(listener: TcpListener) {
         /// i accept everything, send me the trash
@@ -94,18 +97,25 @@ mod tests {
             )
             .unwrap();
 
-        let client = admin::make_reqwest_client(RemoteWriteConfig {
-            url: dummy_remote_write_url.to_owned(),
-            username: "bar".into(),
-            password: "foo".into(),
-            ..Default::default()
-        });
+        let client = admin::make_reqwest_client(
+            RemoteWriteConfig {
+                url: dummy_remote_write_url.to_owned(),
+                username: "bar".into(),
+                password: "foo".into(),
+                ..Default::default()
+            },
+            "dummy user agent",
+        );
 
-        // add handler to server
-        async fn handler(tls_info: axum::Extension<TlsConnectionInfo>) -> String {
-            tls_info.public_key().unwrap().to_string()
-        }
-        let app = admin::app("unittest-network".into(), client, Some(allower.clone()));
+        let app = admin::app(
+            Labels {
+                network: "unittest-network".into(),
+                inventory_hostname: "ansible_inventory_name".into(),
+            },
+            client,
+            HistogramRelay::new(),
+            Some(allower.clone()),
+        );
 
         let listener = std::net::TcpListener::bind("localhost:0").unwrap();
         let server_address = listener.local_addr().unwrap();

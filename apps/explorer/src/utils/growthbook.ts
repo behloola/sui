@@ -3,40 +3,10 @@
 
 import { GrowthBook } from '@growthbook/growthbook';
 
-const GROWTHBOOK_API_KEY = import.meta.env.PROD
-    ? 'key_prod_ac59fe325855eb5f'
-    : 'key_dev_dc2872e15e0c5f95';
-
-export const growthbook = new GrowthBook();
-
-let resolveFeaturesPromise: () => void;
-export const featuresPromise: Promise<void> = new Promise((resolve) => {
-    resolveFeaturesPromise = resolve;
+export const growthbook = new GrowthBook({
+	// If you want to develop locally, you can set the API host to this:
+	// apiHost: 'http://localhost:3003',
+	apiHost: 'https://apps-backend.sui.io',
+	clientKey: import.meta.env.PROD ? 'production' : 'development',
+	enableDevMode: import.meta.env.DEV,
 });
-
-export async function loadFeatures() {
-    try {
-        const res = await fetch(
-            `https://cdn.growthbook.io/api/features/${GROWTHBOOK_API_KEY}`
-        );
-
-        if (!res.ok) {
-            throw new Error(res.statusText);
-        }
-
-        const data = await res.json();
-
-        growthbook.setFeatures(data.features);
-    } catch (e) {
-        console.warn('Failed to fetch feature definitions from Growthbook', e);
-    } finally {
-        resolveFeaturesPromise();
-    }
-}
-
-export enum GROWTHBOOK_FEATURES {
-    EXPLORER_METRICS = 'explorer-metrics',
-    USE_TEST_NET_ENDPOINT = 'testnet-selection',
-    VALIDATOR_PAGE_STAKING = 'validator-page-staking',
-    EPOCHS_CHECKPOINTS = 'explorer-epochs-checkpoints',
-}

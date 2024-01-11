@@ -45,15 +45,12 @@ module games::sea_hero {
     /// potion, fighting boars to gain more experience, or getting a better
     /// sword
     const EHERO_NOT_STRONG_ENOUGH: u64 = 0;
-    /// Too few tokens issued
-    const EINVALID_TOKEN_SUPPLY: u64 = 1;
-    /// Too few monsters created
-    const EINVALID_MONSTER_SUPPLY: u64 = 2;
 
     // --- Initialization ---
 
 
 
+    #[allow(unused_function)]
     /// Get a treasury cap for the coin and give it to the admin
     // TODO: this leverages Move module initializers
     fun init(ctx: &mut TxContext) {

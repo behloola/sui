@@ -1,25 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useRpcClient } from '@mysten/core';
+import { useSuiClient } from '@mysten/dapp-kit';
 import { useQuery } from '@tanstack/react-query';
 
-import type { ObjectId } from '@mysten/sui.js';
-
-export function useNormalizedMoveModule(
-    packageId?: ObjectId | null,
-    moduleName?: string | null
-) {
-    const rpc = useRpcClient();
-    return useQuery(
-        ['normalized-module', packageId, moduleName],
-        async () =>
-            await rpc.getNormalizedMoveModule({
-                package: packageId!,
-                module: moduleName!,
-            }),
-        {
-            enabled: !!(packageId && moduleName),
-        }
-    );
+export function useNormalizedMoveModule(packageId?: string | null, moduleName?: string | null) {
+	const client = useSuiClient();
+	return useQuery({
+		queryKey: ['normalized-module', packageId, moduleName],
+		queryFn: async () =>
+			await client.getNormalizedMoveModule({
+				package: packageId!,
+				module: moduleName!,
+			}),
+		enabled: !!(packageId && moduleName),
+	});
 }

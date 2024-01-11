@@ -3,7 +3,7 @@
 
 // Test limits on length of vectors
 
-//# init --addresses Test=0x0
+//# init --addresses Test=0x0 --max-gas 100000000000000
 
 //# publish
 
@@ -27,14 +27,16 @@ module Test::M1 {
     }
 }
 
+// tests below all fail with OOG on realistic prices
+
 // push below ven len limit should succeed
-//# run Test::M1::push_n_items --args 1 --gas-budget 1000000
+//# run Test::M1::push_n_items --args 1 --gas-budget 100000000000000
 
 // push below vec len limit should succeed
-//# run Test::M1::push_n_items --args 256 --gas-budget 1000000
+//# run Test::M1::push_n_items --args 256 --gas-budget 100000000000000
 
 // run at vec len limit should succeed
-//# run Test::M1::push_n_items --args 262144 --gas-budget 2200000
+//# run Test::M1::push_n_items --args 262144 --gas-budget 100000000000000
 
 // run above vec len limit should fail
-//# run Test::M1::push_n_items --args 262145 --gas-budget 2000000
+//# run Test::M1::push_n_items --args 262145 --gas-budget 100000000000000

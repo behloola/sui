@@ -68,21 +68,11 @@ module sui::balance {
         Balance { value: 0 }
     }
 
-    spec zero {
-        aborts_if false;
-        ensures result.value == 0;
-    }
-
     /// Join two balances together.
     public fun join<T>(self: &mut Balance<T>, balance: Balance<T>): u64 {
         let Balance { value } = balance;
         self.value = self.value + value;
         self.value
-    }
-
-    spec join {
-        ensures self.value == old(self.value) + balance.value;
-        ensures result == self.value;
     }
 
     /// Split a `Balance` and take a sub balance from it.
@@ -92,20 +82,10 @@ module sui::balance {
         Balance { value }
     }
 
-    spec split {
-        aborts_if self.value < value with ENotEnough;
-        ensures self.value == old(self.value) - value;
-        ensures result.value == value;
-    }
-
     /// Withdraw all balance. After this the remaining balance must be 0.
     public fun withdraw_all<T>(self: &mut Balance<T>): Balance<T> {
         let value = self.value;
         split(self, value)
-    }
-
-    spec withdraw_all {
-        ensures self.value == 0;
     }
 
     /// Destroy a zero `Balance`.
@@ -114,10 +94,7 @@ module sui::balance {
         let Balance { value: _ } = balance;
     }
 
-    spec destroy_zero {
-        aborts_if balance.value != 0 with ENonZero;
-    }
-
+    #[allow(unused_function)]
     /// CAUTION: this function creates a `Balance` without increasing the supply.
     /// It should only be called by the epoch change system txn to create staking rewards,
     /// and nowhere else.
@@ -126,6 +103,7 @@ module sui::balance {
         Balance { value }
     }
 
+    #[allow(unused_function)]
     /// CAUTION: this function destroys a `Balance` without decreasing the supply.
     /// It should only be called by the epoch change system txn to destroy storage rebates,
     /// and nowhere else.
@@ -151,6 +129,12 @@ module sui::balance {
     public fun destroy_for_testing<T>(self: Balance<T>): u64 {
         let Balance { value } = self;
         value
+    }
+
+    #[test_only]
+    /// Create a `Supply` of any coin for testing purposes.
+    public fun create_supply_for_testing<T>(): Supply<T> {
+        Supply { value: 0 }
     }
 }
 

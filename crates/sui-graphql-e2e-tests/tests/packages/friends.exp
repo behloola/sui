@@ -1,0 +1,352 @@
+processed 9 tasks
+
+init:
+A: object(0,0)
+
+task 1 'publish'. lines 6-17:
+created: object(1,0), object(1,1)
+mutated: object(0,0)
+gas summary: computation_cost: 1000000, storage_cost: 7379600,  storage_rebate: 0, non_refundable_storage_fee: 0
+
+task 2 'create-checkpoint'. lines 19-19:
+Checkpoint created: 1
+
+task 3 'run-graphql'. lines 21-79:
+Response: {
+  "data": {
+    "transactionBlockConnection": {
+      "nodes": [
+        {
+          "effects": {
+            "objectChanges": {
+              "nodes": [
+                {
+                  "outputState": {
+                    "asMovePackage": {
+                      "module": {
+                        "all": {
+                          "edges": [
+                            {
+                              "cursor": "MA",
+                              "node": {
+                                "name": "m0"
+                              }
+                            },
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            },
+                            {
+                              "cursor": "Mg",
+                              "node": {
+                                "name": "m2"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": false,
+                            "hasPreviousPage": false
+                          }
+                        },
+                        "after": {
+                          "edges": [
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            },
+                            {
+                              "cursor": "Mg",
+                              "node": {
+                                "name": "m2"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": false,
+                            "hasPreviousPage": true
+                          }
+                        },
+                        "before": {
+                          "edges": [
+                            {
+                              "cursor": "MA",
+                              "node": {
+                                "name": "m0"
+                              }
+                            },
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": true,
+                            "hasPreviousPage": false
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+task 4 'run-graphql'. lines 82-111:
+Response: {
+  "data": {
+    "transactionBlockConnection": {
+      "nodes": [
+        {
+          "effects": {
+            "objectChanges": {
+              "nodes": [
+                {
+                  "outputState": {
+                    "asMovePackage": {
+                      "module": null
+                    }
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "errors": [
+    {
+      "message": "Connection's page size of 1000 exceeds max of 50",
+      "locations": [
+        {
+          "line": 5,
+          "column": 13
+        }
+      ],
+      "path": [
+        "transactionBlockConnection",
+        "nodes",
+        0,
+        "effects",
+        "objectChanges",
+        "nodes",
+        0,
+        "outputState",
+        "asMovePackage",
+        "module",
+        "friends"
+      ],
+      "extensions": {
+        "code": "BAD_USER_INPUT"
+      }
+    }
+  ]
+}
+
+task 5 'run-graphql'. lines 113-175:
+Response: {
+  "data": {
+    "transactionBlockConnection": {
+      "nodes": [
+        {
+          "effects": {
+            "objectChanges": {
+              "nodes": [
+                {
+                  "outputState": {
+                    "asMovePackage": {
+                      "module": {
+                        "prefix": {
+                          "edges": [
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": true,
+                            "hasPreviousPage": true
+                          }
+                        },
+                        "prefixAll": {
+                          "edges": [
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            },
+                            {
+                              "cursor": "Mg",
+                              "node": {
+                                "name": "m2"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": false,
+                            "hasPreviousPage": true
+                          }
+                        },
+                        "suffix": {
+                          "edges": [
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": true,
+                            "hasPreviousPage": true
+                          }
+                        },
+                        "suffixAll": {
+                          "edges": [
+                            {
+                              "cursor": "MA",
+                              "node": {
+                                "name": "m0"
+                              }
+                            },
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            }
+                          ],
+                          "pageInfo": {
+                            "hasNextPage": true,
+                            "hasPreviousPage": false
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+task 6 'upgrade'. lines 177-191:
+created: object(6,0)
+mutated: object(0,0), object(1,1)
+gas summary: computation_cost: 1000000, storage_cost: 8139600,  storage_rebate: 2595780, non_refundable_storage_fee: 26220
+
+task 7 'create-checkpoint'. lines 193-193:
+Checkpoint created: 2
+
+task 8 'run-graphql'. lines 195-228:
+Response: {
+  "data": {
+    "transactionBlockConnection": {
+      "nodes": [
+        {
+          "effects": {
+            "objectChanges": {
+              "nodes": [
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": {
+                      "module": {
+                        "friends": {
+                          "edges": [
+                            {
+                              "cursor": "MA",
+                              "node": {
+                                "name": "m0"
+                              }
+                            },
+                            {
+                              "cursor": "MQ",
+                              "node": {
+                                "name": "m1"
+                              }
+                            },
+                            {
+                              "cursor": "Mg",
+                              "node": {
+                                "name": "m2"
+                              }
+                            },
+                            {
+                              "cursor": "Mw",
+                              "node": {
+                                "name": "m3"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "outputState": {
+                    "asMovePackage": null
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

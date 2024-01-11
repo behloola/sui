@@ -9,14 +9,20 @@ use prometheus::core::GenericCounter;
 use prometheus::{register_int_counter_vec_with_registry, IntCounterVec, Registry};
 use std::sync::Arc;
 use sui_types::crypto::AuthorityPublicKeyBytes;
+use sui_types::effects::{SignedTransactionEffects, TransactionEffectsAPI};
 use sui_types::messages_checkpoint::{
     CertifiedCheckpointSummary, CheckpointRequest, CheckpointResponse, CheckpointSequenceNumber,
 };
+use sui_types::messages_grpc::{
+    HandleCertificateResponseV2, ObjectInfoRequest, ObjectInfoResponse, SystemStateRequest,
+    TransactionInfoRequest, TransactionStatus, VerifiedObjectInfoResponse,
+};
+use sui_types::messages_safe_client::PlainTransactionInfoResponse;
 use sui_types::sui_system_state::SuiSystemState;
 use sui_types::{base_types::*, committee::*, fp_ensure};
 use sui_types::{
     error::{SuiError, SuiResult},
-    messages::*,
+    transaction::*,
 };
 use tap::TapFallible;
 use tracing::{debug, error};
@@ -110,6 +116,7 @@ impl SafeClientMetrics {
         let handle_tx_info_latency = metrics_base
             .latency
             .with_label_values(&[&validator_address, "handle_transaction_info_request"]);
+
         Self {
             total_requests_handle_transaction_info_request,
             total_ok_responses_handle_transaction_info_request,
@@ -132,14 +139,17 @@ impl SafeClientMetrics {
 /// See `SafeClientMetrics::new` for description of each metrics.
 /// The metrics are per validator client.
 #[derive(Clone)]
-pub struct SafeClient<C> {
+pub struct SafeClient<C>
+where
+    C: Clone,
+{
     authority_client: C,
     committee_store: Arc<CommitteeStore>,
     address: AuthorityPublicKeyBytes,
     metrics: SafeClientMetrics,
 }
 
-impl<C> SafeClient<C> {
+impl<C: Clone> SafeClient<C> {
     pub fn new(
         authority_client: C,
         committee_store: Arc<CommitteeStore>,
@@ -155,7 +165,7 @@ impl<C> SafeClient<C> {
     }
 }
 
-impl<C> SafeClient<C> {
+impl<C: Clone> SafeClient<C> {
     pub fn authority_client(&self) -> &C {
         &self.authority_client
     }
@@ -213,7 +223,7 @@ impl<C> SafeClient<C> {
     fn check_transaction_info(
         &self,
         digest: &TransactionDigest,
-        transaction: VerifiedTransaction,
+        transaction: Transaction,
         status: TransactionStatus,
     ) -> SuiResult<PlainTransactionInfoResponse> {
         fp_ensure!(
@@ -227,7 +237,7 @@ impl<C> SafeClient<C> {
             TransactionStatus::Signed(signed) => {
                 self.get_committee(&signed.epoch)?;
                 Ok(PlainTransactionInfoResponse::Signed(
-                    SignedTransaction::new_from_data_and_sig(transaction.into_message(), signed),
+                    SignedTransaction::new_from_data_and_sig(transaction.into_data(), signed),
                 ))
             }
             TransactionStatus::Executed(cert_opt, effects, events) => {
@@ -235,12 +245,18 @@ impl<C> SafeClient<C> {
                 match cert_opt {
                     Some(cert) => {
                         let committee = self.get_committee(&cert.epoch)?;
+                        let ct = CertifiedTransaction::new_from_data_and_sig(
+                            transaction.into_data(),
+                            cert,
+                        );
+                        ct.verify_committee_sigs_only(&committee).map_err(|e| {
+                            SuiError::FailedToVerifyTxCertWithExecutedEffects {
+                                validator_name: self.address,
+                                error: e.to_string(),
+                            }
+                        })?;
                         Ok(PlainTransactionInfoResponse::ExecutedWithCert(
-                            CertifiedTransaction::new_from_data_and_sig(
-                                transaction.into_message(),
-                                cert,
-                            )
-                            .verify(&committee)?,
+                            ct,
                             signed_effects,
                             events,
                         ))
@@ -289,13 +305,13 @@ where
     /// Initiate a new transfer to a Sui or Primary account.
     pub async fn handle_transaction(
         &self,
-        transaction: VerifiedTransaction,
+        transaction: Transaction,
     ) -> Result<PlainTransactionInfoResponse, SuiError> {
         let _timer = self.metrics.handle_transaction_latency.start_timer();
         let digest = *transaction.digest();
         let response = self
             .authority_client
-            .handle_transaction(transaction.clone().into_inner())
+            .handle_transaction(transaction.clone())
             .await?;
         let response = check_error!(
             self.address,
@@ -305,36 +321,36 @@ where
         Ok(response)
     }
 
-    fn verify_certificate_response(
+    fn verify_certificate_response_v2(
         &self,
         digest: &TransactionDigest,
-        response: HandleCertificateResponse,
-    ) -> SuiResult<HandleCertificateResponse> {
-        Ok(HandleCertificateResponse {
-            signed_effects: self.check_signed_effects_plain(
-                digest,
-                response.signed_effects,
-                None,
-            )?,
+        response: HandleCertificateResponseV2,
+    ) -> SuiResult<HandleCertificateResponseV2> {
+        let signed_effects =
+            self.check_signed_effects_plain(digest, response.signed_effects, None)?;
+
+        Ok(HandleCertificateResponseV2 {
+            signed_effects,
             events: response.events,
+            fastpath_input_objects: vec![], // unused field
         })
     }
 
     /// Execute a certificate.
-    pub async fn handle_certificate(
+    pub async fn handle_certificate_v2(
         &self,
         certificate: CertifiedTransaction,
-    ) -> Result<HandleCertificateResponse, SuiError> {
+    ) -> Result<HandleCertificateResponseV2, SuiError> {
         let digest = *certificate.digest();
         let _timer = self.metrics.handle_certificate_latency.start_timer();
         let response = self
             .authority_client
-            .handle_certificate(certificate)
+            .handle_certificate_v2(certificate)
             .await?;
 
         let verified = check_error!(
             self.address,
-            self.verify_certificate_response(&digest, response),
+            self.verify_certificate_response_v2(&digest, response),
             "Client error in handle_certificate"
         )?;
         Ok(verified)
@@ -377,17 +393,14 @@ where
             .handle_transaction_info_request(request.clone())
             .await?;
 
-        let transaction_info = Transaction::new(transaction_info.transaction)
-            .verify()
-            .and_then(|verified_tx| {
-                self.check_transaction_info(
-                    &request.transaction_digest,
-                    verified_tx,
-                    transaction_info.status,
-                )
-            }).tap_err(|err| {
-                error!(?err, authority=?self.address, "Client error in handle_transaction_info_request");
-            })?;
+        let transaction = Transaction::new(transaction_info.transaction);
+        let transaction_info = self.check_transaction_info(
+            &request.transaction_digest,
+            transaction,
+            transaction_info.status,
+        ).tap_err(|err| {
+            error!(?err, authority=?self.address, "Client error in handle_transaction_info_request");
+        })?;
         self.metrics
             .total_ok_responses_handle_transaction_info_request
             .inc();

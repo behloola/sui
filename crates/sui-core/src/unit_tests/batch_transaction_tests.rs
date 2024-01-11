@@ -5,6 +5,7 @@ use super::*;
 use crate::authority::authority_tests::init_state_with_ids_and_object_basics;
 use bcs;
 use sui_types::{
+    execution_status::ExecutionStatus,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
     utils::to_sender_signed_transaction,
 };
@@ -29,6 +30,7 @@ async fn test_batch_transaction_ok() -> anyhow::Result<()> {
         [sender; TOTAL].into_iter().zip(all_ids.clone().into_iter()),
     )
     .await;
+    let rgp = authority_state.reference_gas_price_for_testing()?;
     let mut builder = ProgrammableTransactionBuilder::new();
     for obj_id in all_ids.iter().take(N) {
         builder
@@ -56,7 +58,7 @@ async fn test_batch_transaction_ok() -> anyhow::Result<()> {
             )
             .unwrap();
     }
-    let data = TransactionData::new_programmable_with_dummy_gas_price(
+    let data = TransactionData::new_programmable(
         sender,
         vec![authority_state
             .get_object(&all_ids[N])
@@ -64,13 +66,14 @@ async fn test_batch_transaction_ok() -> anyhow::Result<()> {
             .unwrap()
             .compute_object_reference()],
         builder.finish(),
-        1000000,
+        rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS * (N as u64),
+        rgp,
     );
 
     let tx = to_sender_signed_transaction(data, &sender_key);
     let response = send_and_confirm_transaction(&authority_state, tx).await?;
     let effects = response.1.into_data();
-    assert!(effects.status().is_ok());
+    assert_eq!(effects.status(), &ExecutionStatus::Success);
     assert_eq!(
         (effects.created().len(), effects.mutated().len()),
         (N, N + 1),
@@ -105,6 +108,7 @@ async fn test_batch_transaction_last_one_fail() -> anyhow::Result<()> {
         [sender; TOTAL].into_iter().zip(all_ids.clone().into_iter()),
     )
     .await;
+    let rgp = authority_state.reference_gas_price_for_testing()?;
     let mut builder = ProgrammableTransactionBuilder::new();
     for obj_id in all_ids.iter().take(N) {
         builder
@@ -127,15 +131,16 @@ async fn test_batch_transaction_last_one_fail() -> anyhow::Result<()> {
             vec![],
         )
         .unwrap();
-    let data = TransactionData::new_with_dummy_gas_price(
-        TransactionKind::programmable(builder.finish()),
+    let data = TransactionData::new_programmable(
         sender,
-        authority_state
+        vec![authority_state
             .get_object(&all_ids[N])
             .await?
             .unwrap()
-            .compute_object_reference(),
-        100000,
+            .compute_object_reference()],
+        builder.finish(),
+        rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
+        rgp,
     );
 
     let tx = to_sender_signed_transaction(data, &sender_key);
@@ -157,6 +162,7 @@ async fn test_batch_insufficient_gas_balance() -> anyhow::Result<()> {
     // However we provide a gas coin with only 49999 balance.
     let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
     let (authority_state, package) = init_state_with_ids_and_object_basics([]).await;
+    let rgp = authority_state.reference_gas_price_for_testing()?;
     let gas_object_id = ObjectID::random();
     let gas_object = Object::with_id_owner_gas_for_testing(
         gas_object_id,
@@ -183,11 +189,12 @@ async fn test_batch_insufficient_gas_balance() -> anyhow::Result<()> {
             )
             .unwrap();
     }
-    let data = TransactionData::new_with_dummy_gas_price(
-        TransactionKind::programmable(builder.finish()),
+    let data = TransactionData::new_programmable(
         sender,
-        gas_object.compute_object_reference(),
-        100000,
+        vec![gas_object.compute_object_reference()],
+        builder.finish(),
+        rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
+        rgp,
     );
 
     let tx = to_sender_signed_transaction(data, &sender_key);

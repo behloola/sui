@@ -1,48 +1,49 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "vitest";
-import { BCS, fromB64, getSuiMoveConfig } from "./../src/index";
+import { describe, expect, it } from 'vitest';
 
-describe("BCS: Generics", () => {
-  it("should handle generics", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+import { BCS, getSuiMoveConfig } from './../src/index';
 
-    bcs.registerEnumType("base::Option<T>", {
-      none: null,
-      some: "T",
-    });
+describe('BCS: Generics', () => {
+	it('should handle generics', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    expect(bcs.de("base::Option<u8>", "00", "hex")).toEqual({ none: true });
-  });
+		bcs.registerEnumType('base::Option<T>', {
+			none: null,
+			some: 'T',
+		});
 
-  it("should handle nested generics", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.de('base::Option<u8>', '00', 'hex')).toEqual({ none: true });
+	});
 
-    bcs.registerEnumType("base::Option<T>", {
-      none: null,
-      some: "T",
-    });
+	it('should handle nested generics', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    bcs.registerStructType("base::Container<T, S>", {
-      tag: "T",
-      data: "base::Option<S>",
-    });
+		bcs.registerEnumType('base::Option<T>', {
+			none: null,
+			some: 'T',
+		});
 
-    expect(bcs.de("base::Container<bool, u8>", "0000", "hex")).toEqual({
-      tag: false,
-      data: { none: true },
-    });
+		bcs.registerStructType('base::Container<T, S>', {
+			tag: 'T',
+			data: 'base::Option<S>',
+		});
 
-    bcs.registerStructType("base::Wrapper", {
-      wrapped: "base::Container<bool, u8>",
-    });
+		expect(bcs.de('base::Container<bool, u8>', '0000', 'hex')).toEqual({
+			tag: false,
+			data: { none: true },
+		});
 
-    expect(bcs.de("base::Wrapper", "0000", "hex")).toEqual({
-      wrapped: {
-        tag: false,
-        data: { none: true },
-      },
-    });
-  });
+		bcs.registerStructType('base::Wrapper', {
+			wrapped: 'base::Container<bool, u8>',
+		});
+
+		expect(bcs.de('base::Wrapper', '0000', 'hex')).toEqual({
+			wrapped: {
+				tag: false,
+				data: { none: true },
+			},
+		});
+	});
 });

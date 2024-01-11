@@ -11,7 +11,7 @@ use sui_types::base_types::TransactionDigest;
 use sui_types::crypto::EmptySignInfo;
 use sui_types::error::{SuiError, SuiResult};
 use sui_types::message_envelope::TrustedEnvelope;
-use sui_types::messages::{SenderSignedData, VerifiedTransaction};
+use sui_types::transaction::{SenderSignedData, VerifiedTransaction};
 use typed_store::rocks::MetricConf;
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 use typed_store::{rocks::DBMap, traits::Map};
@@ -32,7 +32,7 @@ impl WritePathPendingTransactionLog {
     pub fn new(path: PathBuf) -> Self {
         let pending_transactions = WritePathPendingTransactionTable::open_tables_transactional(
             path,
-            MetricConf::default(),
+            MetricConf::new("pending_tx_log"),
             None,
             None,
         );
@@ -51,19 +51,18 @@ impl WritePathPendingTransactionLog {
         tx: &VerifiedTransaction,
     ) -> SuiResult<IsFirstRecord> {
         let tx_digest = tx.digest();
-        let transaction = self.pending_transactions.logs.transaction()?;
+        let mut transaction = self.pending_transactions.logs.transaction()?;
         if transaction
             .get(&self.pending_transactions.logs, tx_digest)?
             .is_some()
         {
             return Ok(false);
         }
-        let result = transaction
-            .insert_batch(
-                &self.pending_transactions.logs,
-                [(tx_digest, tx.serializable_ref())],
-            )?
-            .commit();
+        transaction.insert_batch(
+            &self.pending_transactions.logs,
+            [(tx_digest, tx.serializable_ref())],
+        )?;
+        let result = transaction.commit();
         Ok(result.is_ok())
     }
 
@@ -78,16 +77,15 @@ impl WritePathPendingTransactionLog {
     //        thinks it is the first record. It's preventable by checking this
     //        transaction again after the call of `write_pending_transaction_maybe`.
     pub fn finish_transaction(&self, tx: &TransactionDigest) -> SuiResult {
-        let write_batch = self.pending_transactions.logs.batch();
-        let write_batch =
-            write_batch.delete_batch(&self.pending_transactions.logs, std::iter::once(tx))?;
+        let mut write_batch = self.pending_transactions.logs.batch();
+        write_batch.delete_batch(&self.pending_transactions.logs, std::iter::once(tx))?;
         write_batch.write().map_err(SuiError::from)
     }
 
     pub fn load_all_pending_transactions(&self) -> Vec<VerifiedTransaction> {
         self.pending_transactions
             .logs
-            .iter()
+            .unbounded_iter()
             .map(|(_tx_digest, tx)| VerifiedTransaction::from(tx))
             .collect()
     }
@@ -104,7 +102,7 @@ mod tests {
     async fn test_pending_tx_log_basic() -> anyhow::Result<()> {
         let temp_dir = tempfile::tempdir().unwrap();
         let pending_txes = WritePathPendingTransactionLog::new(temp_dir.path().to_path_buf());
-        let tx = create_fake_transaction();
+        let tx = VerifiedTransaction::new_unchecked(create_fake_transaction());
         let tx_digest = *tx.digest();
         assert!(pending_txes
             .write_pending_transaction_maybe(&tx)
@@ -127,7 +125,9 @@ mod tests {
         pending_txes.finish_transaction(&tx_digest).unwrap();
 
         // Test writing and finishing more transactions
-        let txes: Vec<_> = (0..10).map(|_| create_fake_transaction()).collect();
+        let txes: Vec<_> = (0..10)
+            .map(|_| VerifiedTransaction::new_unchecked(create_fake_transaction()))
+            .collect();
         for tx in txes.iter().take(10) {
             assert!(pending_txes
                 .write_pending_transaction_maybe(tx)

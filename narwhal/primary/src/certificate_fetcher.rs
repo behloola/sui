@@ -1,13 +1,14 @@
 // Copyright (c) 2021, Facebook, Inc. and its affiliates
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
+use crate::consensus::ConsensusRound;
 use crate::{metrics::PrimaryMetrics, synchronizer::Synchronizer};
-use anemo::Network;
+use anemo::Request;
 use config::{AuthorityIdentifier, Committee};
-use consensus::consensus::ConsensusRound;
 use crypto::NetworkPublicKey;
 use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
+use mysten_metrics::metered_channel::Receiver;
 use mysten_metrics::{monitored_future, monitored_scope, spawn_logged_monitored_task};
 use network::PrimaryToPrimaryRpc;
 use rand::{rngs::ThreadRng, seq::SliceRandom};
@@ -17,18 +18,18 @@ use std::{
     time::Duration,
 };
 use storage::CertificateStore;
-use tokio::task::{spawn_blocking, JoinSet};
+use sui_protocol_config::ProtocolConfig;
 use tokio::{
     sync::watch,
-    task::JoinHandle,
+    task::{spawn_blocking, JoinHandle, JoinSet},
     time::{sleep, timeout, Instant},
 };
 use tracing::{debug, error, instrument, trace, warn};
 use types::{
     error::{DagError, DagResult},
-    metered_channel::Receiver,
-    Certificate, ConditionalBroadcastReceiver, FetchCertificatesRequest, FetchCertificatesResponse,
-    HeaderAPI, Round,
+    validate_received_certificate_version, Certificate, CertificateAPI,
+    ConditionalBroadcastReceiver, FetchCertificatesRequest, FetchCertificatesResponse, HeaderAPI,
+    Round,
 };
 
 #[cfg(test)]
@@ -36,7 +37,7 @@ use types::{
 pub mod certificate_fetcher_tests;
 
 // Maximum number of certificates to fetch with one request.
-const MAX_CERTIFICATES_TO_FETCH: usize = 10_000;
+const MAX_CERTIFICATES_TO_FETCH: usize = 2_000;
 // Seconds to wait for a response before issuing another parallel fetch request.
 const PARALLEL_FETCH_REQUEST_INTERVAL_SECS: Duration = Duration::from_secs(5);
 // The timeout for an iteration of parallel fetch requests over all peers would be
@@ -47,17 +48,28 @@ const PARALLEL_FETCH_REQUEST_ADDITIONAL_TIMEOUT: Duration = Duration::from_secs(
 // time (verifying a batch of 200 certificates should take > 100ms).
 const VERIFY_CERTIFICATES_BATCH_SIZE: usize = 200;
 
-/// The CertificateFetcher is responsible for fetching certificates that this node is missing
-/// from other primaries. It operates two loops:
-/// Loop 1: listens for certificates missing parents from the core, tracks the highest missing
-/// round per origin, and kicks start fetch tasks if needed.
-/// Loop 2: runs fetch task to request certificates from other primaries continuously, until all
-/// highest missing rounds have been met.
+#[derive(Clone, Debug)]
+pub enum CertificateFetcherCommand {
+    /// Fetch the certificate and its ancestors.
+    Ancestors(Certificate),
+    /// Fetch once from a random primary.
+    Kick,
+}
+
+/// The CertificateFetcher is responsible for fetching certificates that this primary is missing
+/// from peers. It operates a loop which listens for commands to fetch a specific certificate's
+/// ancestors, or just to start one fetch attempt.
+///
+/// In each fetch, the CertificateFetcher first scans locally available certificates. Then it sends
+/// this information to a random peer. The peer would reply with the missing certificates that can
+/// be accepted by this primary. After a fetch completes, another one will start immediately if
+/// there are more certificates missing ancestors.
 pub(crate) struct CertificateFetcher {
     /// Internal state of CertificateFetcher.
     state: Arc<CertificateFetcherState>,
     /// The committee information.
     committee: Committee,
+    protocol_config: ProtocolConfig,
     /// Persistent storage for certificates. Read-only usage.
     certificate_store: CertificateStore,
     /// Receiver for signal of round changes.
@@ -65,7 +77,7 @@ pub(crate) struct CertificateFetcher {
     /// Receiver for shutdown.
     rx_shutdown: ConditionalBroadcastReceiver,
     /// Receives certificates with missing parents from the `Synchronizer`.
-    rx_certificate_fetcher: Receiver<Certificate>,
+    rx_certificate_fetcher: Receiver<CertificateFetcherCommand>,
     /// Map of validator to target rounds that local store must catch up to.
     /// The targets are updated with each certificate missing parents sent from the core.
     /// Each fetch task may satisfy some / all / none of the targets.
@@ -94,11 +106,12 @@ impl CertificateFetcher {
     pub fn spawn(
         authority_id: AuthorityIdentifier,
         committee: Committee,
+        protocol_config: ProtocolConfig,
         network: anemo::Network,
         certificate_store: CertificateStore,
         rx_consensus_round_updates: watch::Receiver<ConsensusRound>,
         rx_shutdown: ConditionalBroadcastReceiver,
-        rx_certificate_fetcher: Receiver<Certificate>,
+        rx_certificate_fetcher: Receiver<CertificateFetcherCommand>,
         synchronizer: Arc<Synchronizer>,
         metrics: Arc<PrimaryMetrics>,
     ) -> JoinHandle<()> {
@@ -114,6 +127,7 @@ impl CertificateFetcher {
                 Self {
                     state,
                     committee,
+                    protocol_config,
                     certificate_store,
                     rx_consensus_round_updates,
                     rx_shutdown,
@@ -131,8 +145,18 @@ impl CertificateFetcher {
     async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some(certificate) = self.rx_certificate_fetcher.recv() => {
-                    let header = &certificate.header;
+                Some(command) = self.rx_certificate_fetcher.recv() => {
+                    let certificate = match command {
+                        CertificateFetcherCommand::Ancestors(certificate) => certificate,
+                        CertificateFetcherCommand::Kick => {
+                            // Kick start a fetch task if there is no other task running.
+                            if self.fetch_certificates_task.is_empty() {
+                                self.kickstart();
+                            }
+                            continue;
+                        }
+                    };
+                    let header = &certificate.header();
                     if header.epoch() != self.committee.epoch() {
                         continue;
                     }
@@ -155,9 +179,7 @@ impl CertificateFetcher {
                     }
 
                     // The header should have been verified as part of the certificate.
-                    match self
-                    .certificate_store
-                    .last_round_number(header.author()) {
+                    match self.certificate_store.last_round_number(header.author()) {
                         Ok(r) => {
                             if header.round() <= r.unwrap_or(0) {
                                 // Ignore fetch request. Possibly the certificate was processed
@@ -182,9 +204,19 @@ impl CertificateFetcher {
                     }
                 },
                 Some(result) = self.fetch_certificates_task.join_next(), if !self.fetch_certificates_task.is_empty() => {
-                    // propagate any panics. We don't expect for cancellations to get propagated as
-                    // we gracefully shutdown the component by exiting the loop first
-                    result.unwrap();
+                    match result {
+                        Ok(()) => {},
+                        Err(e) => {
+                            if e.is_cancelled() {
+                                // avoid crashing on ungraceful shutdown
+                            } else if e.is_panic() {
+                                // propagate panics.
+                                std::panic::resume_unwind(e.into_panic());
+                            } else {
+                                panic!("fetch certificates task failed: {e}");
+                            }
+                        },
+                    };
 
                     // Kick start another fetch task after the previous one terminates.
                     // If all targets have been fetched, the new task will clean up the targets and exit.
@@ -231,8 +263,7 @@ impl CertificateFetcher {
 
         self.targets.retain(|origin, target_round| {
             let last_written_round = written_rounds.get(origin).map_or(gc_round, |rounds| {
-                // TODO: switch to last() after it stabilizes for BTreeSet.
-                rounds.iter().rev().next().unwrap_or(&gc_round).to_owned()
+                rounds.last().unwrap_or(&gc_round).to_owned()
             });
             // Drop sync target when cert store already has an equal or higher round for the origin.
             // This applies GC to targets as well.
@@ -250,6 +281,7 @@ impl CertificateFetcher {
 
         let state = self.state.clone();
         let committee = self.committee.clone();
+        let protocol_config = self.protocol_config.clone();
 
         debug!(
             "Starting task to fetch missing certificates: max target {}, gc round {:?}",
@@ -262,7 +294,15 @@ impl CertificateFetcher {
                 state.metrics.certificate_fetcher_inflight_fetch.inc();
 
                 let now = Instant::now();
-                match run_fetch_task(state.clone(), committee, gc_round, written_rounds).await {
+                match run_fetch_task(
+                    &protocol_config,
+                    state.clone(),
+                    committee,
+                    gc_round,
+                    written_rounds,
+                )
+                .await
+                {
                     Ok(_) => {
                         debug!(
                             "Finished task to fetch certificates successfully, elapsed = {}s",
@@ -270,7 +310,7 @@ impl CertificateFetcher {
                         );
                     }
                     Err(e) => {
-                        warn!("Error from task to fetch certificates: {e}");
+                        warn!("Error from fetch certificates task: {e}");
                     }
                 };
 
@@ -286,6 +326,7 @@ impl CertificateFetcher {
 #[allow(clippy::mutable_key_type)]
 #[instrument(level = "debug", skip_all)]
 async fn run_fetch_task(
+    protocol_config: &ProtocolConfig,
     state: Arc<CertificateFetcherState>,
     committee: Committee,
     gc_round: Round,
@@ -296,17 +337,24 @@ async fn run_fetch_task(
         .set_bounds(gc_round, written_rounds)
         .set_max_items(MAX_CERTIFICATES_TO_FETCH);
     let Some(response) =
-        fetch_certificates_helper(state.authority_id, &state.network, &committee, request).await else {
-            return Err(DagError::NoCertificateFetched);
-        };
+        fetch_certificates_helper(state.authority_id, &state.network, &committee, request).await
+    else {
+        return Err(DagError::NoCertificateFetched);
+    };
 
     // Process and store fetched certificates.
     let num_certs_fetched = response.certificates.len();
-    process_certificates_helper(response, &state.synchronizer, &state.network).await?;
+    process_certificates_helper(
+        protocol_config,
+        response,
+        &state.synchronizer,
+        state.metrics.clone(),
+    )
+    .await?;
     state
         .metrics
         .certificate_fetcher_num_certificates_processed
-        .add(num_certs_fetched as i64);
+        .inc_by(num_certs_fetched as u64);
 
     debug!("Successfully fetched and processed {num_certs_fetched} certificates");
     Ok(())
@@ -334,13 +382,13 @@ async fn fetch_certificates_helper(
     let fetch_timeout = PARALLEL_FETCH_REQUEST_INTERVAL_SECS * peers.len().try_into().unwrap()
         + PARALLEL_FETCH_REQUEST_ADDITIONAL_TIMEOUT;
     let fetch_callback = async move {
-        // TODO: shuffle by stake weight instead.
         debug!("Starting to fetch certificates");
         let mut fut = FuturesUnordered::new();
         // Loop until one peer returns with certificates, or no peer does.
         loop {
             if let Some(peer) = peers.pop() {
-                let request = request.clone();
+                let request = Request::new(request.clone())
+                    .with_timeout(PARALLEL_FETCH_REQUEST_INTERVAL_SECS * 2);
                 fut.push(monitored_future!(async move {
                     debug!("Sending out fetch request in parallel to {peer}");
                     let result = network.fetch_certificates(&peer, request).await;
@@ -394,9 +442,10 @@ async fn fetch_certificates_helper(
 
 #[instrument(level = "debug", skip_all)]
 async fn process_certificates_helper(
+    protocol_config: &ProtocolConfig,
     response: FetchCertificatesResponse,
     synchronizer: &Synchronizer,
-    network: &Network,
+    metrics: Arc<PrimaryMetrics>,
 ) -> DagResult<()> {
     trace!("Start sending fetched certificates to processing");
     if response.certificates.len() > MAX_CERTIFICATES_TO_FETCH {
@@ -405,42 +454,80 @@ async fn process_certificates_helper(
             MAX_CERTIFICATES_TO_FETCH,
         ));
     }
-    // Verify certificates in parallel.
+
+    // We should not be getting mixed versions of certificates from a
+    // validator, so any individual certificate with mismatched versions
+    // should cancel processing for the entire batch of fetched certificates.
+    let certificates = response
+        .certificates
+        .into_iter()
+        .map(|cert| {
+            validate_received_certificate_version(cert, protocol_config).map_err(|err| {
+                error!("fetched certficate processing error: {err}");
+                DagError::InvalidCertificateVersion
+            })
+        })
+        .collect::<DagResult<Vec<Certificate>>>()?;
+
     // In PrimaryReceiverHandler, certificates already in storage are ignored.
     // The check is unnecessary here, because there is no concurrent processing of older
     // certificates. For byzantine failures, the check will not be effective anyway.
-    let _verify_scope = monitored_scope("VerifyingFetchedCertificates");
-    let all_certificates = response.certificates;
-    let verify_tasks = all_certificates
+    let _scope = monitored_scope("ProcessingFetchedCertificates");
+
+    if protocol_config.narwhal_certificate_v2() {
+        synchronizer
+            .try_accept_fetched_certificates(certificates)
+            .await?;
+    } else {
+        process_certificates_v1_helper(certificates, synchronizer, metrics).await?;
+    }
+
+    trace!("Fetched certificates have been processed");
+
+    Ok(())
+}
+
+// Verify certificates in parallel.
+async fn process_certificates_v1_helper(
+    certificates: Vec<Certificate>,
+    synchronizer: &Synchronizer,
+    metrics: Arc<PrimaryMetrics>,
+) -> DagResult<()> {
+    let verify_tasks = certificates
         .chunks(VERIFY_CERTIFICATES_BATCH_SIZE)
         .map(|certs| {
             let certs = certs.to_vec();
             let sync = synchronizer.clone();
+            let metrics = metrics.clone();
             // Use threads dedicated to computation heavy work.
             spawn_blocking(move || {
-                for c in &certs {
-                    sync.sanitize_certificate(c)?;
+                let now = Instant::now();
+                let mut sanitized_certs = Vec::new();
+                for c in certs {
+                    sanitized_certs.push(sync.sanitize_certificate(c)?);
                 }
-                Ok::<Vec<Certificate>, DagError>(certs)
+                metrics
+                    .certificate_fetcher_total_verification_us
+                    .inc_by(now.elapsed().as_micros() as u64);
+                Ok::<Vec<Certificate>, DagError>(sanitized_certs)
             })
         })
         .collect_vec();
     // Process verified certificates in the same order as received.
     for task in verify_tasks {
         let certificates = task.await.map_err(|_| DagError::Canceled)??;
+        let now = Instant::now();
         for cert in certificates {
-            if let Err(e) = synchronizer
-                .try_accept_fetched_certificate(cert, network)
-                .await
-            {
+            if let Err(e) = synchronizer.try_accept_fetched_certificate(cert).await {
                 // It is possible that subsequent certificates are useful,
                 // so not stopping early.
                 warn!("Failed to accept fetched certificate: {e}");
             }
         }
+        metrics
+            .certificate_fetcher_total_accept_us
+            .inc_by(now.elapsed().as_micros() as u64);
     }
-
-    trace!("Fetched certificates have been processed");
 
     Ok(())
 }

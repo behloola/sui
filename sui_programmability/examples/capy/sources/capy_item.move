@@ -63,6 +63,7 @@ module capy::capy_item {
         name: String,
     }
 
+    #[allow(unused_function)]
     /// Create a `ItemStore` and a `StoreOwnerCap` for this store.
     fun init(ctx: &mut TxContext) {
         transfer::share_object(ItemStore {
@@ -151,7 +152,7 @@ module capy::capy_item {
     public entry fun buy_mut(
         s: &mut ItemStore, name: vector<u8>, payment: &mut Coin<SUI>, ctx: &mut TxContext
     ) {
-        let listing = dof::borrow<vector<u8>, ListedItem>(&mut s.id, name);
+        let listing = dof::borrow<vector<u8>, ListedItem>(&s.id, name);
         let paid = coin::split(payment, listing.price, ctx);
         buy_and_take(s, name, paid, ctx)
     }
@@ -169,7 +170,7 @@ module capy::capy_item {
 
     /// Construct an image URL for the `CapyItem`.
     fun img_url(name: vector<u8>): Url {
-        let capy_url = *&IMAGE_URL;
+        let capy_url = IMAGE_URL;
         vec::append(&mut capy_url, name);
         vec::append(&mut capy_url, b"/svg");
 

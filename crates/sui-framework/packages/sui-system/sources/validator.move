@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[allow(unused_const)]
 module sui_system::validator {
     use std::ascii;
     use std::vector;
@@ -14,6 +15,7 @@ module sui_system::validator {
     use std::option::{Option, Self};
     use sui_system::staking_pool::{Self, PoolTokenExchangeRate, StakedSui, StakingPool};
     use std::string::{Self, String};
+    use sui::transfer;
     use sui::url::Url;
     use sui::url;
     use sui::event;
@@ -67,16 +69,29 @@ module sui_system::validator {
     /// Intended validator is not a candidate one.
     const ENotValidatorCandidate: u64 = 10;
 
+    /// Stake amount is invalid or wrong.
+    const EInvalidStakeAmount: u64 = 11;
+
+    /// Function called during non-genesis times.
+    const ECalledDuringNonGenesis: u64 = 12;
+
     /// New Capability is not created by the validator itself
     const ENewCapNotCreatedByValidatorItself: u64 = 100;
 
     /// Capability code is not valid
     const EInvalidCap: u64 = 101;
 
+    /// Validator trying to set gas price higher than threshold.
+    const EGasPriceHigherThanThreshold: u64 = 102;
 
-    const MAX_COMMISSION_RATE: u64 = 10_000; // Max rate is 100%, which is 10K base points
+    // TODO: potentially move this value to onchain config.
+    const MAX_COMMISSION_RATE: u64 = 2_000; // Max rate is 20%, which is 2000 base points
 
     const MAX_VALIDATOR_METADATA_LENGTH: u64 = 256;
+
+    // TODO: Move this to onchain config when we have a good way to do it.
+    /// Max gas price a validator can set is 100K MIST.
+    const MAX_VALIDATOR_GAS_PRICE: u64 = 100_000;
 
     struct ValidatorMetadata has store {
         /// The Sui Address of the validator. This is the sender that created the Validator object,
@@ -238,6 +253,7 @@ module sui_system::validator {
             EValidatorMetadataExceedingLengthLimit
         );
         assert!(commission_rate <= MAX_COMMISSION_RATE, ECommissionRateTooHigh);
+        assert!(gas_price < MAX_VALIDATOR_GAS_PRICE, EGasPriceHigherThanThreshold);
 
         let metadata = new_metadata(
             sui_address,
@@ -288,12 +304,12 @@ module sui_system::validator {
         stake: Balance<SUI>,
         staker_address: address,
         ctx: &mut TxContext,
-    ) {
+    ) : StakedSui {
         let stake_amount = balance::value(&stake);
-        assert!(stake_amount > 0, 0);
+        assert!(stake_amount > 0, EInvalidStakeAmount);
         let stake_epoch = tx_context::epoch(ctx) + 1;
-        staking_pool::request_add_stake(
-            &mut self.staking_pool, stake, staker_address, stake_epoch, ctx
+        let staked_sui = staking_pool::request_add_stake(
+            &mut self.staking_pool, stake, stake_epoch, ctx
         );
         // Process stake right away if staking pool is preactive.
         if (staking_pool::is_preactive(&self.staking_pool)) {
@@ -309,6 +325,7 @@ module sui_system::validator {
                 amount: stake_amount,
             }
         );
+        staked_sui
     }
 
     /// Request to add stake to the validator's staking pool at genesis
@@ -318,17 +335,18 @@ module sui_system::validator {
         staker_address: address,
         ctx: &mut TxContext,
     ) {
-        assert!(tx_context::epoch(ctx) == 0, 0);
+        assert!(tx_context::epoch(ctx) == 0, ECalledDuringNonGenesis);
         let stake_amount = balance::value(&stake);
-        assert!(stake_amount > 0, 0);
+        assert!(stake_amount > 0, EInvalidStakeAmount);
 
-        staking_pool::request_add_stake(
+        let staked_sui = staking_pool::request_add_stake(
             &mut self.staking_pool,
             stake,
-            staker_address,
             0, // epoch 0 -- genesis
             ctx
         );
+
+        transfer::public_transfer(staked_sui, staker_address);
 
         // Process stake right away
         staking_pool::process_pending_stake(&mut self.staking_pool);
@@ -339,12 +357,13 @@ module sui_system::validator {
     public(friend) fun request_withdraw_stake(
         self: &mut Validator,
         staked_sui: StakedSui,
-        ctx: &mut TxContext,
-    ) {
+        ctx: &TxContext,
+    ) : Balance<SUI> {
         let principal_amount = staking_pool::staked_sui_amount(&staked_sui);
         let stake_activation_epoch = staking_pool::stake_activation_epoch(&staked_sui);
-        let withdraw_amount = staking_pool::request_withdraw_stake(
+        let withdrawn_stake = staking_pool::request_withdraw_stake(
                 &mut self.staking_pool, staked_sui, ctx);
+        let withdraw_amount = balance::value(&withdrawn_stake);
         let reward_amount = withdraw_amount - principal_amount;
         self.next_epoch_stake = self.next_epoch_stake - withdraw_amount;
         event::emit(
@@ -357,7 +376,8 @@ module sui_system::validator {
                 principal_amount,
                 reward_amount,
             }
-        )
+        );
+        withdrawn_stake
     }
 
     /// Request to set new gas price for the next epoch.
@@ -367,6 +387,7 @@ module sui_system::validator {
         verified_cap: ValidatorOperationCap,
         new_price: u64,
     ) {
+        assert!(new_price < MAX_VALIDATOR_GAS_PRICE, EGasPriceHigherThanThreshold);
         let validator_address = *validator_cap::verified_operation_cap_address(&verified_cap);
         assert!(validator_address == self.metadata.sui_address, EInvalidCap);
         self.next_epoch_gas_price = new_price;
@@ -379,6 +400,7 @@ module sui_system::validator {
         new_price: u64
     ) {
         assert!(is_preactive(self), ENotValidatorCandidate);
+        assert!(new_price < MAX_VALIDATOR_GAS_PRICE, EGasPriceHigherThanThreshold);
         let validator_address = *validator_cap::verified_operation_cap_address(&verified_cap);
         assert!(validator_address == self.metadata.sui_address, EInvalidCap);
         self.next_epoch_gas_price = new_price;
@@ -405,9 +427,9 @@ module sui_system::validator {
     }
 
     /// Process pending stakes and withdraws, called at the end of the epoch.
-    public(friend) fun process_pending_stakes_and_withdraws(self: &mut Validator, ctx: &mut TxContext) {
+    public(friend) fun process_pending_stakes_and_withdraws(self: &mut Validator, ctx: &TxContext) {
         staking_pool::process_pending_stakes_and_withdraws(&mut self.staking_pool, ctx);
-        assert!(stake_amount(self) == self.next_epoch_stake, 0);
+        assert!(stake_amount(self) == self.next_epoch_stake, EInvalidStakeAmount);
     }
 
     /// Returns true if the validator is preactive.
@@ -514,15 +536,7 @@ module sui_system::validator {
     // TODO: this and `delegate_amount` and `total_stake` all seem to return the same value?
     // two of the functions can probably be removed.
     public fun total_stake_amount(self: &Validator): u64 {
-        spec {
-            // TODO: this should be provable rather than assumed
-            assume self.staking_pool.sui_balance <= MAX_U64;
-        };
         staking_pool::sui_balance(&self.staking_pool)
-    }
-
-    spec total_stake_amount {
-        aborts_if false;
     }
 
     public fun stake_amount(self: &Validator): u64 {
@@ -572,9 +586,8 @@ module sui_system::validator {
     public fun is_duplicate(self: &Validator, other: &Validator): bool {
          self.metadata.sui_address == other.metadata.sui_address
             || self.metadata.name == other.metadata.name
-            // MUSTFIX: tests break when this is uncommented
-            // || self.metadata.net_address == other.metadata.net_address
-            // || self.metadata.p2p_address == other.metadata.p2p_address
+            || self.metadata.net_address == other.metadata.net_address
+            || self.metadata.p2p_address == other.metadata.p2p_address
             || self.metadata.protocol_pubkey_bytes == other.metadata.protocol_pubkey_bytes
             || self.metadata.network_pubkey_bytes == other.metadata.network_pubkey_bytes
             || self.metadata.network_pubkey_bytes == other.metadata.worker_pubkey_bytes
@@ -851,15 +864,7 @@ module sui_system::validator {
 
     public native fun validate_metadata_bcs(metadata: vector<u8>);
 
-    spec validate_metadata_bcs {
-        pragma opaque;
-        // TODO: stub to be replaced by actual abort conditions if any
-        aborts_if [abstract] true;
-        // TODO: specify actual function behavior
-     }
-
-    #[test_only]
-    public fun get_staking_pool_ref(self: &Validator) : &StakingPool {
+    public(friend) fun get_staking_pool_ref(self: &Validator) : &StakingPool {
         &self.staking_pool
     }
 

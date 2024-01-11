@@ -7,10 +7,11 @@ Describe the changes or additions included in this PR.
 How did you test the new or updated feature?
 
 ---
-If your changes are not user-facing and not a breaking change, you can skip the following section. Otherwise, please indicate what changed, and then add to the Release Notes section as highlighted during the release process.
+If your changes are not user-facing and do not break anything, you can skip the following section. Otherwise, please briefly describe what has changed under the Release Notes section.
 
 ### Type of Change (Check all that apply)
 
+- [ ] protocol change
 - [ ] user-visible impact
 - [ ] breaking change for a client SDKs
 - [ ] breaking change for FNs (FN binary must upgrade)

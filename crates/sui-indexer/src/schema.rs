@@ -17,10 +17,39 @@ pub mod sql_types {
 }
 
 diesel::table! {
-    addresses (account_address) {
+    active_addresses (account_address) {
+        #[max_length = 66]
         account_address -> Varchar,
+        #[max_length = 44]
         first_appearance_tx -> Varchar,
         first_appearance_time -> Int8,
+        #[max_length = 44]
+        last_appearance_tx -> Varchar,
+        last_appearance_time -> Int8,
+    }
+}
+
+diesel::table! {
+    address_stats (checkpoint) {
+        checkpoint -> Int8,
+        epoch -> Int8,
+        timestamp_ms -> Int8,
+        cumulative_addresses -> Int8,
+        cumulative_active_addresses -> Int8,
+        daily_active_addresses -> Int8,
+    }
+}
+
+diesel::table! {
+    addresses (account_address) {
+        #[max_length = 66]
+        account_address -> Varchar,
+        #[max_length = 44]
+        first_appearance_tx -> Varchar,
+        first_appearance_time -> Int8,
+        #[max_length = 44]
+        last_appearance_tx -> Varchar,
+        last_appearance_time -> Int8,
     }
 }
 
@@ -34,21 +63,53 @@ diesel::table! {
 }
 
 diesel::table! {
+    changed_objects (id) {
+        id -> Int8,
+        #[max_length = 44]
+        transaction_digest -> Varchar,
+        checkpoint_sequence_number -> Int8,
+        epoch -> Int8,
+        #[max_length = 66]
+        object_id -> Varchar,
+        object_change_type -> Text,
+        object_version -> Int8,
+    }
+}
+
+diesel::table! {
+    checkpoint_metrics (checkpoint) {
+        checkpoint -> Int8,
+        epoch -> Int8,
+        real_time_tps -> Float8,
+        peak_tps_30d -> Float8,
+        rolling_total_transactions -> Int8,
+        rolling_total_transaction_blocks -> Int8,
+        rolling_total_successful_transactions -> Int8,
+        rolling_total_successful_transaction_blocks -> Int8,
+    }
+}
+
+diesel::table! {
     checkpoints (sequence_number) {
         sequence_number -> Int8,
+        #[max_length = 255]
         checkpoint_digest -> Varchar,
         epoch -> Int8,
         transactions -> Array<Nullable<Text>>,
+        #[max_length = 255]
         previous_checkpoint_digest -> Nullable<Varchar>,
         end_of_epoch -> Bool,
         total_gas_cost -> Int8,
         total_computation_cost -> Int8,
         total_storage_cost -> Int8,
         total_storage_rebate -> Int8,
+        total_transaction_blocks -> Int8,
         total_transactions -> Int8,
-        total_commands -> Int8,
+        total_successful_transaction_blocks -> Int8,
+        total_successful_transactions -> Int8,
         network_total_transactions -> Int8,
         timestamp_ms -> Int8,
+        validator_signature -> Text,
     }
 }
 
@@ -81,14 +142,16 @@ diesel::table! {
 diesel::table! {
     events (id) {
         id -> Int8,
+        #[max_length = 44]
         transaction_digest -> Varchar,
         event_sequence -> Int8,
+        #[max_length = 66]
         sender -> Varchar,
+        #[max_length = 66]
         package -> Varchar,
         module -> Text,
         event_type -> Text,
         event_time_ms -> Nullable<Int8>,
-        parsed_json -> Jsonb,
         event_bcs -> Bytea,
     }
 }
@@ -96,9 +159,11 @@ diesel::table! {
 diesel::table! {
     input_objects (id) {
         id -> Int8,
+        #[max_length = 44]
         transaction_digest -> Varchar,
         checkpoint_sequence_number -> Int8,
         epoch -> Int8,
+        #[max_length = 66]
         object_id -> Varchar,
         object_version -> Nullable<Int8>,
     }
@@ -107,9 +172,11 @@ diesel::table! {
 diesel::table! {
     move_calls (id) {
         id -> Int8,
+        #[max_length = 44]
         transaction_digest -> Varchar,
         checkpoint_sequence_number -> Int8,
         epoch -> Int8,
+        #[max_length = 66]
         sender -> Varchar,
         move_package -> Text,
         move_module -> Text,
@@ -126,12 +193,16 @@ diesel::table! {
     objects (object_id) {
         epoch -> Int8,
         checkpoint -> Int8,
+        #[max_length = 66]
         object_id -> Varchar,
         version -> Int8,
+        #[max_length = 44]
         object_digest -> Varchar,
         owner_type -> OwnerType,
+        #[max_length = 66]
         owner_address -> Nullable<Varchar>,
         initial_shared_version -> Nullable<Int8>,
+        #[max_length = 44]
         previous_transaction -> Varchar,
         object_type -> Varchar,
         object_status -> ObjectStatus,
@@ -147,17 +218,22 @@ diesel::table! {
     use super::sql_types::ObjectStatus;
     use super::sql_types::BcsBytes;
 
-    objects_history (checkpoint, object_id, version) {
+    objects_history (object_id, version, checkpoint) {
         epoch -> Int8,
         checkpoint -> Int8,
+        #[max_length = 66]
         object_id -> Varchar,
         version -> Int8,
+        #[max_length = 44]
         object_digest -> Varchar,
         owner_type -> OwnerType,
+        #[max_length = 66]
         owner_address -> Nullable<Varchar>,
         old_owner_type -> Nullable<OwnerType>,
+        #[max_length = 66]
         old_owner_address -> Nullable<Varchar>,
         initial_shared_version -> Nullable<Int8>,
+        #[max_length = 44]
         previous_transaction -> Varchar,
         object_type -> Varchar,
         object_status -> ObjectStatus,
@@ -172,8 +248,10 @@ diesel::table! {
     use super::sql_types::BcsBytes;
 
     packages (package_id, version) {
+        #[max_length = 66]
         package_id -> Varchar,
         version -> Int8,
+        #[max_length = 66]
         author -> Varchar,
         data -> Array<Nullable<BcsBytes>>,
     }
@@ -182,10 +260,13 @@ diesel::table! {
 diesel::table! {
     recipients (id) {
         id -> Int8,
+        #[max_length = 44]
         transaction_digest -> Varchar,
         checkpoint_sequence_number -> Int8,
         epoch -> Int8,
+        #[max_length = 66]
         sender -> Varchar,
+        #[max_length = 66]
         recipient -> Varchar,
     }
 }
@@ -220,21 +301,19 @@ diesel::table! {
 diesel::table! {
     transactions (id) {
         id -> Int8,
+        #[max_length = 44]
         transaction_digest -> Varchar,
+        #[max_length = 255]
         sender -> Varchar,
-        recipients -> Array<Nullable<Text>>,
-        checkpoint_sequence_number -> Int8,
-        timestamp_ms -> Int8,
+        checkpoint_sequence_number -> Nullable<Int8>,
+        timestamp_ms -> Nullable<Int8>,
         transaction_kind -> Text,
-        command_count -> Int8,
-        created -> Array<Nullable<Text>>,
-        mutated -> Array<Nullable<Text>>,
-        deleted -> Array<Nullable<Text>>,
-        unwrapped -> Array<Nullable<Text>>,
-        wrapped -> Array<Nullable<Text>>,
-        move_calls -> Array<Nullable<Text>>,
+        transaction_count -> Int8,
+        execution_success -> Bool,
+        #[max_length = 66]
         gas_object_id -> Varchar,
         gas_object_sequence -> Int8,
+        #[max_length = 66]
         gas_object_digest -> Varchar,
         gas_budget -> Int8,
         total_gas_cost -> Int8,
@@ -244,7 +323,6 @@ diesel::table! {
         non_refundable_storage_fee -> Int8,
         gas_price -> Int8,
         raw_transaction -> Bytea,
-        transaction_content -> Text,
         transaction_effects_content -> Text,
         confirmed_local_execution -> Nullable<Bool>,
     }
@@ -296,8 +374,12 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
+    active_addresses,
+    address_stats,
     addresses,
     at_risk_validators,
+    changed_objects,
+    checkpoint_metrics,
     checkpoints,
     epochs,
     events,

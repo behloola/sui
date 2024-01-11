@@ -18,7 +18,7 @@ use crate::{
 use super::QuorumDriver;
 
 #[async_trait]
-pub trait ReconfigObserver<A> {
+pub trait ReconfigObserver<A: Clone> {
     async fn run(&mut self, quorum_driver: Arc<QuorumDriver<A>>);
     fn clone_boxed(&self) -> Box<dyn ReconfigObserver<A> + Send + Sync>;
 }
@@ -59,8 +59,6 @@ impl OnsiteReconfigObserver {
             self.safe_client_metrics_base.clone(),
             self.auth_agg_metrics.clone(),
         )
-        // TODO: we should tolerate when <= f validators give invalid addresses
-        // GH issue: https://github.com/MystenLabs/sui/issues/7019
         .unwrap_or_else(|e| {
             panic!(
                 "Failed to create AuthorityAggregator from System State: {:?}",
@@ -115,7 +113,14 @@ impl ReconfigObserver<NetworkAuthorityClient> for OnsiteReconfigObserver {
                 Err(RecvError::Lagged(_)) => {
                     continue;
                 }
-                Err(RecvError::Closed) => panic!("Do not expect the channel to be closed"),
+                Err(RecvError::Closed) => {
+                    // Closing the channel only happens in simtest when a node is shut down.
+                    if cfg!(msim) {
+                        return;
+                    } else {
+                        panic!("Do not expect the channel to be closed")
+                    }
+                }
             }
         }
     }
@@ -126,7 +131,7 @@ pub struct DummyReconfigObserver;
 #[async_trait]
 impl<A> ReconfigObserver<A> for DummyReconfigObserver
 where
-    A: AuthorityAPI + Send + Sync + 'static,
+    A: AuthorityAPI + Send + Sync + Clone + 'static,
 {
     fn clone_boxed(&self) -> Box<dyn ReconfigObserver<A> + Send + Sync> {
         Box::new(Self {})

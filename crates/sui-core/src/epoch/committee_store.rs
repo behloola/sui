@@ -9,7 +9,7 @@ use std::sync::Arc;
 use sui_types::base_types::ObjectID;
 use sui_types::committee::{Committee, EpochId};
 use sui_types::error::{SuiError, SuiResult};
-use typed_store::rocks::{point_lookup_db_options, DBMap, DBOptions, MetricConf};
+use typed_store::rocks::{default_db_options, DBMap, DBOptions, MetricConf};
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 
 use typed_store::Map;
@@ -31,14 +31,14 @@ pub struct CommitteeStoreTables {
 
 // These functions are used to initialize the DB tables
 fn committee_table_default_config() -> DBOptions {
-    point_lookup_db_options()
+    default_db_options().optimize_for_point_lookup(64)
 }
 
 impl CommitteeStore {
     pub fn new(path: PathBuf, genesis_committee: &Committee, db_options: Option<Options>) -> Self {
         let tables = CommitteeStoreTables::open_tables_read_write(
             path,
-            MetricConf::default(),
+            MetricConf::new("committee"),
             db_options,
             None,
         );
@@ -98,7 +98,7 @@ impl CommitteeStore {
     pub fn get_latest_committee(&self) -> Committee {
         self.tables
             .committee_map
-            .iter()
+            .unbounded_iter()
             .skip_to_last()
             .next()
             // unwrap safe because we guarantee there is at least a genesis epoch
@@ -126,6 +126,6 @@ impl CommitteeStore {
     }
 
     fn database_is_empty(&self) -> bool {
-        self.tables.committee_map.iter().next().is_none()
+        self.tables.committee_map.unbounded_iter().next().is_none()
     }
 }

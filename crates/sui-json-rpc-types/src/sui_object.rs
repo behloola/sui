@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write;
@@ -10,9 +11,9 @@ use anyhow::anyhow;
 use colored::Colorize;
 use fastcrypto::encoding::Base64;
 use move_bytecode_utils::module_cache::GetModule;
+use move_core_types::annotated_value::{MoveStruct, MoveStructLayout};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::StructTag;
-use move_core_types::value::{MoveStruct, MoveStructLayout};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -22,14 +23,17 @@ use serde_with::DisplayFromStr;
 
 use sui_protocol_config::ProtocolConfig;
 use sui_types::base_types::{
-    MoveObjectType, ObjectDigest, ObjectID, ObjectInfo, ObjectRef, ObjectType, SequenceNumber,
-    SuiAddress, TransactionDigest,
+    ObjectDigest, ObjectID, ObjectInfo, ObjectRef, ObjectType, SequenceNumber, SuiAddress,
+    TransactionDigest,
 };
-use sui_types::error::{SuiObjectResponseError, UserInputError, UserInputResult};
+use sui_types::error::{ExecutionError, SuiObjectResponseError, UserInputError, UserInputResult};
 use sui_types::gas_coin::GasCoin;
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::move_package::{MovePackage, TypeOrigin, UpgradeInfo};
-use sui_types::object::{Data, MoveObject, Object, ObjectFormatOptions, ObjectRead, Owner};
+use sui_types::object::{Data, MoveObject, Object, ObjectInner, ObjectRead, Owner};
+use sui_types::sui_serde::BigInt;
+use sui_types::sui_serde::SequenceNumber as AsSequenceNumber;
+use sui_types::sui_serde::SuiStructTag;
 
 use crate::{Page, SuiMoveStruct, SuiMoveValue};
 
@@ -61,16 +65,43 @@ impl SuiObjectResponse {
     }
 }
 
+impl Ord for SuiObjectResponse {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (&self.data, &other.data) {
+            (Some(data), Some(data_2)) => {
+                if data.object_id.cmp(&data_2.object_id).eq(&Ordering::Greater) {
+                    return Ordering::Greater;
+                } else if data.object_id.cmp(&data_2.object_id).eq(&Ordering::Less) {
+                    return Ordering::Less;
+                }
+                Ordering::Equal
+            }
+            // In this ordering those with data will come before SuiObjectResponses that are errors.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            // SuiObjectResponses that are errors are just considered equal.
+            _ => Ordering::Equal,
+        }
+    }
+}
+
+impl PartialOrd for SuiObjectResponse {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl SuiObjectResponse {
     pub fn move_object_bcs(&self) -> Option<&Vec<u8>> {
-        if let Some(data) = &self.data {
-            match &data.bcs {
-                Some(SuiRawData::MoveObject(obj)) => Some(&obj.bcs_bytes),
-                _ => None,
-            };
+        match &self.data {
+            Some(SuiObjectData {
+                bcs: Some(SuiRawData::MoveObject(obj)),
+                ..
+            }) => Some(&obj.bcs_bytes),
+            _ => None,
         }
-        None
     }
+
     pub fn owner(&self) -> Option<Owner> {
         if let Some(data) = &self.data {
             return data.owner;
@@ -128,12 +159,20 @@ impl TryFrom<SuiObjectResponse> for ObjectInfo {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Eq, PartialEq)]
+pub struct DisplayFieldsResponse {
+    pub data: Option<BTreeMap<String, String>>,
+    pub error: Option<SuiObjectResponseError>,
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", rename = "ObjectData")]
 pub struct SuiObjectData {
     pub object_id: ObjectID,
     /// Object version.
+    #[schemars(with = "AsSequenceNumber")]
+    #[serde_as(as = "AsSequenceNumber")]
     pub version: SequenceNumber,
     /// Base64 string representing the object digest
     pub digest: ObjectDigest,
@@ -153,13 +192,15 @@ pub struct SuiObjectData {
     /// The amount of SUI we would rebate if this object gets deleted.
     /// This number is re-calculated each time the object is mutated based on
     /// the present storage gas price.
+    #[schemars(with = "Option<BigInt<u64>>")]
+    #[serde_as(as = "Option<BigInt<u64>>")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_rebate: Option<u64>,
     /// The Display metadata for frontend UI rendering, default to be None unless SuiObjectDataOptions.showContent is set to true
     /// This can also be None if the struct type does not have Display defined
     /// See more details in <https://forums.sui.io/t/nft-object-display-proposal/4872>
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub display: Option<BTreeMap<String, String>>,
+    pub display: Option<DisplayFieldsResponse>,
     /// Move object content or package content, default to be None unless SuiObjectDataOptions.showContent is set to true
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<SuiParsedData>,
@@ -182,7 +223,7 @@ impl SuiObjectData {
 
     pub fn is_gas_coin(&self) -> bool {
         match self.type_.as_ref() {
-            Some(ObjectType::Struct(MoveObjectType::GasCoin)) => true,
+            Some(ObjectType::Struct(ty)) if ty.is_gas_coin() => true,
             Some(_) => false,
             None => false,
         }
@@ -471,6 +512,8 @@ impl
             None
         };
 
+        let o = o.into_inner();
+
         let content: Option<SuiParsedData> = if show_content {
             let data = match o.data {
                 Data::Move(m) => {
@@ -515,7 +558,7 @@ impl
         Object,
         Option<MoveStructLayout>,
         SuiObjectDataOptions,
-        Option<BTreeMap<String, String>>,
+        Option<DisplayFieldsResponse>,
     )> for SuiObjectData
 {
     type Error = anyhow::Error;
@@ -526,7 +569,7 @@ impl
             Object,
             Option<MoveStructLayout>,
             SuiObjectDataOptions,
-            Option<BTreeMap<String, String>>,
+            Option<DisplayFieldsResponse>,
         ),
     ) -> Result<Self, Self::Error> {
         let show_display = options.show_display;
@@ -597,7 +640,7 @@ impl TryInto<Object> for SuiObjectData {
                 "BCS data is required to convert SuiObjectData to Object"
             ))?,
         };
-        Ok(Object {
+        Ok(ObjectInner {
             data,
             owner: self
                 .owner
@@ -608,7 +651,8 @@ impl TryInto<Object> for SuiObjectData {
             storage_rebate: self.storage_rebate.ok_or_else(|| {
                 anyhow!("storage_rebate is required to convert SuiObjectData to Object")
             })?,
-        })
+        }
+        .into())
     }
 }
 
@@ -772,12 +816,38 @@ impl Display for SuiParsedData {
     }
 }
 
+impl SuiParsedData {
+    pub fn try_from_object_read(object_read: ObjectRead) -> Result<Self, anyhow::Error> {
+        match object_read {
+            ObjectRead::NotExists(id) => Err(anyhow::anyhow!("Object {} does not exist", id)),
+            ObjectRead::Exists(_object_ref, o, layout) => {
+                let data = match o.into_inner().data {
+                    Data::Move(m) => {
+                        let layout = layout.ok_or_else(|| {
+                            anyhow!("Layout is required to convert Move object to json")
+                        })?;
+                        SuiParsedData::try_from_object(m, layout)?
+                    }
+                    Data::Package(p) => SuiParsedData::try_from_package(p)?,
+                };
+                Ok(data)
+            }
+            ObjectRead::Deleted((object_id, version, digest)) => Err(anyhow::anyhow!(
+                "Object {} was deleted at version {} with digest {}",
+                object_id,
+                version,
+                digest
+            )),
+        }
+    }
+}
+
 pub trait SuiMoveObject: Sized {
     fn try_from_layout(object: MoveObject, layout: MoveStructLayout)
         -> Result<Self, anyhow::Error>;
 
     fn try_from(o: MoveObject, resolver: &impl GetModule) -> Result<Self, anyhow::Error> {
-        let layout = o.get_layout(ObjectFormatOptions::default(), resolver)?;
+        let layout = o.get_layout(resolver)?;
         Self::try_from_layout(o, layout)
     }
 
@@ -789,7 +859,7 @@ pub trait SuiMoveObject: Sized {
 #[serde(rename = "MoveObject", rename_all = "camelCase")]
 pub struct SuiParsedMoveObject {
     #[serde(rename = "type")]
-    #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "SuiStructTag")]
     #[schemars(with = "String")]
     pub type_: StructTag,
     pub has_public_transfer: bool,
@@ -825,6 +895,24 @@ impl SuiMoveObject for SuiParsedMoveObject {
     }
 }
 
+impl SuiParsedMoveObject {
+    pub fn try_from_object_read(object_read: ObjectRead) -> Result<Self, anyhow::Error> {
+        let parsed_data = SuiParsedData::try_from_object_read(object_read)?;
+        match parsed_data {
+            SuiParsedData::MoveObject(o) => Ok(o),
+            SuiParsedData::Package(_) => Err(anyhow::anyhow!("Object is not a Move object")),
+        }
+    }
+
+    pub fn read_dynamic_field_value(&self, field_name: &str) -> Option<SuiMoveValue> {
+        match &self.fields {
+            SuiMoveStruct::WithFields(fields) => fields.get(field_name).cloned(),
+            SuiMoveStruct::WithTypes { fields, .. } => fields.get(field_name).cloned(),
+            _ => None,
+        }
+    }
+}
+
 pub fn type_and_fields_from_move_struct(
     type_: &StructTag,
     move_struct: MoveStruct,
@@ -841,7 +929,7 @@ pub fn type_and_fields_from_move_struct(
 pub struct SuiRawMoveObject {
     #[schemars(with = "String")]
     #[serde(rename = "type")]
-    #[serde_as(as = "DisplayFromStr")]
+    #[serde_as(as = "SuiStructTag")]
     pub type_: StructTag,
     pub has_public_transfer: bool,
     pub version: SequenceNumber,
@@ -907,6 +995,22 @@ impl From<MovePackage> for SuiRawMovePackage {
             type_origin_table: p.type_origin_table().clone(),
             linkage_table: p.linkage_table().clone(),
         }
+    }
+}
+
+impl SuiRawMovePackage {
+    pub fn to_move_package(
+        &self,
+        max_move_package_size: u64,
+    ) -> Result<MovePackage, ExecutionError> {
+        MovePackage::new(
+            self.id,
+            self.version,
+            self.module_map.clone(),
+            max_move_package_size,
+            self.type_origin_table.clone(),
+            self.linkage_table.clone(),
+        )
     }
 }
 
@@ -991,22 +1095,29 @@ pub struct SuiMovePackage {
     pub disassembled: BTreeMap<String, Value>,
 }
 
-pub type ObjectsPage = Page<SuiObjectResponse, CheckpointedObjectID>;
+pub type QueryObjectsPage = Page<SuiObjectResponse, CheckpointedObjectID>;
+pub type ObjectsPage = Page<SuiObjectResponse, ObjectID>;
 
+#[serde_as]
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointedObjectID {
     pub object_id: ObjectID,
+    #[schemars(with = "Option<BigInt<u64>>")]
+    #[serde_as(as = "Option<BigInt<u64>>")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_checkpoint: Option<CheckpointSequenceNumber>,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Eq, PartialEq)]
 #[serde(rename = "GetPastObjectRequest", rename_all = "camelCase")]
 pub struct SuiGetPastObjectRequest {
     /// the ID of the queried object
     pub object_id: ObjectID,
     /// the version of the queried object.
+    #[schemars(with = "AsSequenceNumber")]
+    #[serde_as(as = "AsSequenceNumber")]
     pub version: SequenceNumber,
 }
 
@@ -1015,6 +1126,7 @@ pub struct SuiGetPastObjectRequest {
 pub enum SuiObjectDataFilter {
     MatchAll(Vec<SuiObjectDataFilter>),
     MatchAny(Vec<SuiObjectDataFilter>),
+    MatchNone(Vec<SuiObjectDataFilter>),
     /// Query by type a specified Package.
     Package(ObjectID),
     /// Query by type a specified Move module.
@@ -1029,7 +1141,7 @@ pub enum SuiObjectDataFilter {
     /// Query by type
     StructType(
         #[schemars(with = "String")]
-        #[serde_as(as = "DisplayFromStr")]
+        #[serde_as(as = "SuiStructTag")]
         StructTag,
     ),
     AddressOwner(SuiAddress),
@@ -1037,7 +1149,11 @@ pub enum SuiObjectDataFilter {
     ObjectId(ObjectID),
     // allow querying for multiple object ids
     ObjectIds(Vec<ObjectID>),
-    Version(u64),
+    Version(
+        #[schemars(with = "BigInt<u64>")]
+        #[serde_as(as = "BigInt<u64>")]
+        u64,
+    ),
 }
 
 impl SuiObjectDataFilter {
@@ -1051,11 +1167,15 @@ impl SuiObjectDataFilter {
     pub fn or(self, other: Self) -> Self {
         Self::MatchAny(vec![self, other])
     }
+    pub fn not(self, other: Self) -> Self {
+        Self::MatchNone(vec![self, other])
+    }
 
     pub fn matches(&self, object: &ObjectInfo) -> bool {
         match self {
             SuiObjectDataFilter::MatchAll(filters) => !filters.iter().any(|f| !f.matches(object)),
             SuiObjectDataFilter::MatchAny(filters) => filters.iter().any(|f| f.matches(object)),
+            SuiObjectDataFilter::MatchNone(filters) => !filters.iter().any(|f| f.matches(object)),
             SuiObjectDataFilter::StructType(s) => {
                 let obj_tag: StructTag = match &object.type_ {
                     ObjectType::Package => return false,

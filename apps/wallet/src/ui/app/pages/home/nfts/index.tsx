@@ -1,76 +1,104 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Coin } from '@mysten/sui.js';
-import { Link } from 'react-router-dom';
-
 import { useActiveAddress } from '_app/hooks/useActiveAddress';
 import Alert from '_components/alert';
-import { ErrorBoundary } from '_components/error-boundary';
+import FiltersPortal from '_components/filters-tags';
 import Loading from '_components/loading';
-import { NFTDisplayCard } from '_components/nft-display';
-import { useObjectsOwnedByAddress } from '_hooks';
+import LoadingSpinner from '_components/loading/LoadingIndicator';
+import { setToSessionStorage } from '_src/background/storage-utils';
+import { AssetFilterTypes, useGetNFTs } from '_src/ui/app/hooks/useGetNFTs';
 import PageTitle from '_src/ui/app/shared/PageTitle';
+import { useOnScreen } from '@mysten/core';
+import { useEffect, useMemo, useRef } from 'react';
+import { useParams } from 'react-router-dom';
 
-import type { SuiObjectResponse, SuiObjectData } from '@mysten/sui.js';
+import { useHiddenAssets } from '../hidden-assets/HiddenAssetsProvider';
+import AssetsOptionsMenu from './AssetsOptionsMenu';
+import NonVisualAssets from './NonVisualAssets';
+import VisualAssets from './VisualAssets';
 
 function NftsPage() {
-    const accountAddress = useActiveAddress();
-    const { data, isLoading, error, isError } = useObjectsOwnedByAddress(
-        accountAddress,
-        { options: { showType: true } }
-    );
-    const sui_object_responses = data?.data as SuiObjectResponse[];
-    const nft_objects = sui_object_responses?.filter(
-        (obj) => !Coin.isCoin(obj)
-    );
-    const nfts = nft_objects?.map((nft) => {
-        const nft_details = nft.data as SuiObjectData;
-        return nft_details;
-    });
+	const accountAddress = useActiveAddress();
+	const {
+		data: ownedAssets,
+		hasNextPage,
+		isLoading,
+		isFetchingNextPage,
+		error,
+		isPending,
+		fetchNextPage,
+		isError,
+	} = useGetNFTs(accountAddress);
+	const observerElem = useRef<HTMLDivElement | null>(null);
+	const { isIntersecting } = useOnScreen(observerElem);
+	const isSpinnerVisible = isFetchingNextPage && hasNextPage;
 
-    return (
-        <div className="flex flex-col flex-nowrap items-center gap-4 flex-1">
-            <PageTitle title="NFTs" />
-            <Loading loading={isLoading}>
-                {isError ? (
-                    <Alert>
-                        <div>
-                            <strong>Sync error (data might be outdated)</strong>
-                        </div>
-                        <small>{(error as Error).message}</small>
-                    </Alert>
-                ) : null}
-                {nfts?.length ? (
-                    <div className="grid grid-cols-2 gap-x-3.5 gap-y-4 w-full h-full">
-                        {nfts.map(({ objectId }) => (
-                            <Link
-                                to={`/nft-details?${new URLSearchParams({
-                                    objectId,
-                                }).toString()}`}
-                                key={objectId}
-                                className="no-underline"
-                            >
-                                <ErrorBoundary>
-                                    <NFTDisplayCard
-                                        objectId={objectId}
-                                        size="md"
-                                        showLabel
-                                        animateHover
-                                        borderRadius="xl"
-                                    />
-                                </ErrorBoundary>
-                            </Link>
-                        ))}
-                    </div>
-                ) : (
-                    <div className="text-steel-darker font-semibold text-caption flex-1 self-center flex items-center">
-                        No NFTs found
-                    </div>
-                )}
-            </Loading>
-        </div>
-    );
+	useEffect(() => {
+		if (isIntersecting && hasNextPage && !isFetchingNextPage) {
+			fetchNextPage();
+		}
+	}, [isIntersecting, fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+	const handleFilterChange = async (tag: any) => {
+		await setToSessionStorage<string>('NFTS_PAGE_NAVIGATION', tag.link);
+	};
+	const { filterType } = useParams();
+	const filteredNFTs = useMemo(() => {
+		if (!filterType) return ownedAssets?.visual;
+		return ownedAssets?.[filterType as AssetFilterTypes] ?? [];
+	}, [ownedAssets, filterType]);
+	const { hiddenAssetIds } = useHiddenAssets();
+
+	if (isLoading) {
+		return (
+			<div className="mt-1 flex w-full justify-center">
+				<LoadingSpinner />
+			</div>
+		);
+	}
+
+	const tags = [
+		{ name: 'Visual Assets', link: 'nfts' },
+		{ name: 'Everything Else', link: 'nfts/other' },
+	];
+
+	return (
+		<div className="flex min-h-full flex-col flex-nowrap items-center gap-4">
+			<PageTitle title="Assets" after={hiddenAssetIds.length ? <AssetsOptionsMenu /> : null} />
+			{!!ownedAssets?.other.length && (
+				<FiltersPortal firstLastMargin tags={tags} callback={handleFilterChange} />
+			)}
+			<Loading loading={isPending}>
+				{isError ? (
+					<Alert>
+						<div>
+							<strong>Sync error (data might be outdated)</strong>
+						</div>
+						<small>{(error as Error).message}</small>
+					</Alert>
+				) : null}
+				{filteredNFTs?.length ? (
+					filterType === AssetFilterTypes.other ? (
+						<NonVisualAssets items={filteredNFTs} />
+					) : (
+						<VisualAssets items={filteredNFTs} />
+					)
+				) : (
+					<div className="flex flex-1 items-center self-center text-caption font-semibold text-steel-darker">
+						No Assets found
+					</div>
+				)}
+			</Loading>
+			<div ref={observerElem}>
+				{isSpinnerVisible ? (
+					<div className="mt-1 flex w-full justify-center">
+						<LoadingSpinner />
+					</div>
+				) : null}
+			</div>
+		</div>
+	);
 }
 
 export default NftsPage;

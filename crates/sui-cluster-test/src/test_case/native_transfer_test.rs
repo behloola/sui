@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use jsonrpsee::rpc_params;
 use tracing::info;
 
-use sui_json_rpc_types::SuiTransactionResponse;
+use sui_json_rpc_types::SuiTransactionBlockResponse;
 use sui_types::{
     base_types::{ObjectID, SuiAddress},
     crypto::{get_key_pair, AccountKeyPair},
@@ -31,18 +31,18 @@ impl TestCaseImpl for NativeTransferTest {
 
     async fn run(&self, ctx: &mut TestContext) -> Result<(), anyhow::Error> {
         info!("Testing gas coin transfer");
-        let mut sui_objs = ctx.get_sui_from_faucet(Some(4)).await;
-        let gas_obj = sui_objs.swap_remove(0);
+        let mut sui_objs = ctx.get_sui_from_faucet(Some(1)).await;
+        let gas_obj = ctx.get_sui_from_faucet(Some(1)).await.swap_remove(0);
+
         let signer = ctx.get_wallet_address();
         let (recipient_addr, _): (_, AccountKeyPair) = get_key_pair();
-
         // Test transfer object
-        let obj_to_transfer = *sui_objs.swap_remove(0).id();
+        let obj_to_transfer: ObjectID = *sui_objs.swap_remove(0).id();
         let params = rpc_params![
             signer,
             obj_to_transfer,
             Some(*gas_obj.id()),
-            5000,
+            (2_000_000).to_string(),
             recipient_addr
         ];
         let data = ctx
@@ -52,9 +52,16 @@ impl TestCaseImpl for NativeTransferTest {
 
         Self::examine_response(ctx, &mut response, signer, recipient_addr, obj_to_transfer).await;
 
+        let mut sui_objs_2 = ctx.get_sui_from_faucet(Some(1)).await;
         // Test transfer sui
-        let obj_to_transfer = *sui_objs.swap_remove(0).id();
-        let params = rpc_params![signer, obj_to_transfer, 5000, recipient_addr, None::<u64>];
+        let obj_to_transfer_2 = *sui_objs_2.swap_remove(0).id();
+        let params = rpc_params![
+            signer,
+            obj_to_transfer_2,
+            (2_000_000).to_string(),
+            recipient_addr,
+            None::<u64>
+        ];
         let data = ctx
             .build_transaction_remotely("unsafe_transferSui", params)
             .await?;
@@ -68,7 +75,7 @@ impl TestCaseImpl for NativeTransferTest {
 impl NativeTransferTest {
     async fn examine_response(
         ctx: &TestContext,
-        response: &mut SuiTransactionResponse,
+        response: &mut SuiTransactionBlockResponse,
         signer: SuiAddress,
         recipient: SuiAddress,
         obj_to_transfer_id: ObjectID,

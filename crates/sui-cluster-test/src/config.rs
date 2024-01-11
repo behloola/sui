@@ -1,8 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use clap::*;
 
-#[derive(Parser, Clone, ArgEnum)]
+use clap::*;
+use regex::Regex;
+use std::{fmt, path::PathBuf};
+
+#[derive(Parser, Clone, ValueEnum, Debug)]
 pub enum Env {
     Devnet,
     Staging,
@@ -13,10 +16,11 @@ pub enum Env {
     NewLocal,
 }
 
-#[derive(Parser)]
+#[derive(derivative::Derivative, Parser)]
+#[derivative(Debug)]
 #[clap(name = "", rename_all = "kebab-case")]
 pub struct ClusterTestOpt {
-    #[clap(arg_enum)]
+    #[clap(value_enum)]
     pub env: Env,
     #[clap(long)]
     pub faucet_address: Option<String>,
@@ -27,9 +31,36 @@ pub struct ClusterTestOpt {
     /// URL for the indexer RPC server
     #[clap(long)]
     pub indexer_address: Option<String>,
+    /// Use new version of indexer or not
+    #[clap(long)]
+    pub use_indexer_v2: bool,
     /// URL for the Indexer Postgres DB
     #[clap(long)]
+    #[derivative(Debug(format_with = "obfuscated_pg_address"))]
     pub pg_address: Option<String>,
+    /// TODO(gegao): remove this after indexer migration is complete.
+    #[clap(long)]
+    pub use_indexer_experimental_methods: bool,
+    #[clap(long)]
+    pub config_dir: Option<PathBuf>,
+    /// URL for the indexer RPC server
+    #[clap(long)]
+    pub graphql_address: Option<String>,
+}
+
+fn obfuscated_pg_address(val: &Option<String>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match val {
+        None => write!(f, "None"),
+        Some(val) => {
+            write!(
+                f,
+                "{}",
+                Regex::new(r":.*@")
+                    .unwrap()
+                    .replace_all(val.as_str(), ":*****@")
+            )
+        }
+    }
 }
 
 impl ClusterTestOpt {
@@ -41,6 +72,10 @@ impl ClusterTestOpt {
             epoch_duration_ms: None,
             indexer_address: None,
             pg_address: None,
+            use_indexer_experimental_methods: false,
+            config_dir: None,
+            graphql_address: None,
+            use_indexer_v2: false,
         }
     }
 }

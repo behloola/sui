@@ -6,15 +6,17 @@ use clap::*;
 
 use prometheus::Registry;
 use rand::seq::SliceRandom;
+use rand::Rng;
+use sui_protocol_config::Chain;
+use tokio::time::sleep;
 
 use std::sync::Arc;
+use std::time::Duration;
 use sui_benchmark::drivers::bench_driver::BenchDriver;
 use sui_benchmark::drivers::driver::Driver;
 use sui_benchmark::drivers::BenchmarkCmp;
 use sui_benchmark::drivers::BenchmarkStats;
 use sui_protocol_config::{ProtocolConfig, ProtocolVersion};
-
-use sui_node::metrics;
 
 use sui_benchmark::benchmark_setup::Env;
 use sui_benchmark::options::Opts;
@@ -55,8 +57,8 @@ async fn main() -> Result<()> {
 
     // TODO: query the network for the current protocol version.
     let protocol_config = match opts.protocol_version {
-        Some(v) => ProtocolConfig::get_for_version(ProtocolVersion::new(v)),
-        None => ProtocolConfig::get_for_max_version(),
+        Some(v) => ProtocolConfig::get_for_version(ProtocolVersion::new(v), Chain::Unknown),
+        None => ProtocolConfig::get_for_max_version_UNSAFE(),
     };
 
     let max_num_new_move_object_ids = protocol_config.max_num_new_move_object_ids();
@@ -77,12 +79,13 @@ async fn main() -> Result<()> {
     }
     let _guard = config.with_env().init();
 
-    let registry_service = metrics::start_prometheus_server(
+    let registry_service = mysten_metrics::start_prometheus_server(
         format!("{}:{}", opts.client_metric_host, opts.client_metric_port)
             .parse()
             .unwrap(),
     );
     let registry: Registry = registry_service.default_registry();
+    mysten_metrics::init_metrics(&registry);
 
     let barrier = Arc::new(Barrier::new(2));
     let cloned_barrier = barrier.clone();
@@ -107,6 +110,17 @@ async fn main() -> Result<()> {
     };
     let stress_stat_collection = opts.stress_stat_collection;
     barrier.wait().await;
+
+    // Add a small randomized delay before workloads start, to even out the traffic.
+    const START_DELAY_INTERVAL: Duration = Duration::from_secs(2);
+    const START_DELAY_MAX_JITTER_MS: u64 = 2000;
+    if opts.staggered_start_max_multiplier > 0 {
+        let delay = START_DELAY_INTERVAL
+            * rand::thread_rng().gen_range(0..opts.staggered_start_max_multiplier)
+            + Duration::from_millis(rand::thread_rng().gen_range(0..START_DELAY_MAX_JITTER_MS));
+        sleep(delay).await;
+    }
+
     // create client runtime
     let client_runtime = Builder::new_multi_thread()
         .enable_all()

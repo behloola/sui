@@ -26,7 +26,7 @@ module sui::transfer_policy {
     use std::option::{Self, Option};
     use std::type_name::{Self, TypeName};
     use sui::package::{Self, Publisher};
-    use sui::tx_context::TxContext;
+    use sui::tx_context::{sender, TxContext};
     use sui::object::{Self, ID, UID};
     use sui::vec_set::{Self, VecSet};
     use sui::dynamic_field as df;
@@ -96,6 +96,10 @@ module sui::transfer_policy {
     /// making the discoverability and tracking the supported types easier.
     struct TransferPolicyCreated<phantom T> has copy, drop { id: ID }
 
+    /// Event that is emitted when a publisher destroys a `TransferPolicyCap`.
+    /// Allows for tracking supported policies.
+    struct TransferPolicyDestroyed<phantom T> has copy, drop { id: ID }
+
     /// Key to store "Rule" configuration for a specific `TransferPolicy`.
     struct RuleKey<phantom T: drop> has copy, store, drop {}
 
@@ -109,10 +113,10 @@ module sui::transfer_policy {
         TransferRequest { item, paid, from, receipts: vec_set::empty() }
     }
 
-    /// Register a type in the Kiosk system and receive an `TransferPolicyCap`
-    /// which is required to confirm kiosk deals for the `T`. If there's no
-    /// `TransferPolicyCap` available for use, the type can not be traded in
-    /// kiosks.
+    /// Register a type in the Kiosk system and receive a `TransferPolicy` and
+    /// a `TransferPolicyCap` for the type. The `TransferPolicy` is required to
+    /// confirm kiosk deals for the `T`. If there's no `TransferPolicy`
+    /// available for use, the type can not be traded in kiosks.
     public fun new<T>(
         pub: &Publisher, ctx: &mut TxContext
     ): (TransferPolicy<T>, TransferPolicyCap<T>) {
@@ -126,6 +130,16 @@ module sui::transfer_policy {
             TransferPolicy { id, rules: vec_set::empty(), balance: balance::zero() },
             TransferPolicyCap { id: object::new(ctx), policy_id }
         )
+    }
+
+    #[lint_allow(self_transfer, share_owned)]
+    /// Initialize the Tranfer Policy in the default scenario: Create and share
+    /// the `TransferPolicy`, transfer `TransferPolicyCap` to the transaction
+    /// sender.
+    entry fun default<T>(pub: &Publisher, ctx: &mut TxContext) {
+        let (policy, cap) = new<T>(pub, ctx);
+        sui::transfer::share_object(policy);
+        sui::transfer::transfer(cap, sender(ctx));
     }
 
     /// Withdraw some amount of profits from the `TransferPolicy`. If amount
@@ -156,11 +170,12 @@ module sui::transfer_policy {
     ): Coin<SUI> {
         assert!(object::id(&self) == cap.policy_id, ENotOwner);
 
-        let TransferPolicyCap { id: cap_id, policy_id: _ } = cap;
+        let TransferPolicyCap { id: cap_id, policy_id } = cap;
         let TransferPolicy { id, rules: _, balance } = self;
 
         object::delete(id);
         object::delete(cap_id);
+        event::emit(TransferPolicyDestroyed<T> { id: policy_id });
         coin::from_balance(balance, ctx)
     }
 
@@ -242,14 +257,15 @@ module sui::transfer_policy {
     ) {
         assert!(object::id(policy) == cap.policy_id, ENotOwner);
         let _: Config = df::remove(&mut policy.id, RuleKey<Rule> {});
+        vec_set::remove(&mut policy.rules, &type_name::get<Rule>());
     }
 
-    // === Fields access ===
+    // === Fields access: TransferPolicy ===
 
-    /// Allows reading custom attachements to the `TransferPolicy` if there are any.
+    /// Allows reading custom attachments to the `TransferPolicy` if there are any.
     public fun uid<T>(self: &TransferPolicy<T>): &UID { &self.id }
 
-    /// Get a mutable reference to the `self.id` to enable custom attachements
+    /// Get a mutable reference to the `self.id` to enable custom attachments
     /// to the `TransferPolicy`.
     public fun uid_mut_as_owner<T>(
         self: &mut TransferPolicy<T>, cap: &TransferPolicyCap<T>,
@@ -257,6 +273,13 @@ module sui::transfer_policy {
         assert!(object::id(self) == cap.policy_id, ENotOwner);
         &mut self.id
     }
+
+    /// Read the `rules` field from the `TransferPolicy`.
+    public fun rules<T>(self: &TransferPolicy<T>): &VecSet<TypeName> {
+        &self.rules
+    }
+
+    // === Fields access: TransferRequest ===
 
     /// Get the `item` field of the `TransferRequest`.
     public fun item<T>(self: &TransferRequest<T>): ID { self.item }

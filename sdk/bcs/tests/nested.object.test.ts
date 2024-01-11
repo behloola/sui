@@ -1,81 +1,77 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "vitest";
-import { BCS, getSuiMoveConfig } from "../src/index";
+import { describe, expect, it } from 'vitest';
 
-describe("BCS: Nested temp object", () => {
-  it("should support object as a type", () => {
-    const bcs = new BCS(getSuiMoveConfig());
-    const value = { name: { boop: "beep", beep: "100" } };
+import { BCS, getSuiMoveConfig } from '../src/index';
+import { serde } from './utils';
 
-    bcs.registerStructType("Beep", {
-      name: {
-        boop: BCS.STRING,
-        beep: BCS.U64,
-      },
-    });
+describe('BCS: Nested temp object', () => {
+	it('should support object as a type', () => {
+		const bcs = new BCS(getSuiMoveConfig());
+		const value = { name: { boop: 'beep', beep: '100' } };
 
-    expect(serde(bcs, "Beep", value)).toEqual(value);
-  });
+		bcs.registerStructType('Beep', {
+			name: {
+				boop: BCS.STRING,
+				beep: BCS.U64,
+			},
+		});
 
-  it("should support enum invariant as an object", () => {
-    const bcs = new BCS(getSuiMoveConfig());
-    const value = {
-      user: {
-        name: "Bob",
-        age: 20,
-      },
-    };
+		expect(serde(bcs, 'Beep', value)).toEqual(value);
+	});
 
-    bcs.registerEnumType("AccountType", {
-      system: null,
-      user: {
-        name: BCS.STRING,
-        age: BCS.U8,
-      },
-    });
+	it('should support enum invariant as an object', () => {
+		const bcs = new BCS(getSuiMoveConfig());
+		const value = {
+			user: {
+				name: 'Bob',
+				age: 20,
+			},
+		};
 
-    expect(serde(bcs, "AccountType", value)).toEqual(value);
-  });
+		bcs.registerEnumType('AccountType', {
+			system: null,
+			user: {
+				name: BCS.STRING,
+				age: BCS.U8,
+			},
+		});
 
-  it("should support a nested schema", () => {
-    const bcs = new BCS(getSuiMoveConfig());
-    const value = {
-      some: {
-        account: {
-          user: "Bob",
-          age: 20,
-        },
-        meta: {
-          status: {
-            active: true,
-          },
-        },
-      },
-    };
+		expect(serde(bcs, 'AccountType', value)).toEqual(value);
+	});
 
-    bcs.registerEnumType("Option", {
-      none: null,
-      some: {
-        account: {
-          user: BCS.STRING,
-          age: BCS.U8,
-        },
-        meta: {
-          status: {
-            active: BCS.BOOL,
-          },
-        },
-      },
-    });
+	it('should support a nested schema', () => {
+		const bcs = new BCS(getSuiMoveConfig());
+		const value = {
+			some: {
+				account: {
+					user: 'Bob',
+					age: 20,
+				},
+				meta: {
+					status: {
+						active: true,
+					},
+				},
+			},
+		};
 
-    expect(serde(bcs, "Option", value)).toEqual(value);
-  });
+		bcs.registerEnumType('Option', {
+			none: null,
+			some: {
+				account: {
+					user: BCS.STRING,
+					age: BCS.U8,
+				},
+				meta: {
+					status: {
+						active: BCS.BOOL,
+					},
+				},
+			},
+		});
+
+		expect(serde(bcs, 'Option', value)).toEqual(value);
+	});
 });
-
-function serde(bcs, type, data) {
-  let ser = bcs.ser(type, data).toString("hex");
-  let de = bcs.de(type, ser, "hex");
-  return de;
-}

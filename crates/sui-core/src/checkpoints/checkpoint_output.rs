@@ -10,12 +10,12 @@ use std::sync::Arc;
 use sui_types::base_types::AuthorityName;
 use sui_types::error::SuiResult;
 use sui_types::message_envelope::Message;
-use sui_types::messages::ConsensusTransaction;
 use sui_types::messages_checkpoint::{
     CertifiedCheckpointSummary, CheckpointContents, CheckpointSignatureMessage, CheckpointSummary,
     SignedCheckpointSummary, VerifiedCheckpoint,
 };
-use tracing::{debug, info, trace};
+use sui_types::messages_consensus::ConsensusTransaction;
+use tracing::{debug, info, instrument, trace};
 
 use super::CheckpointMetrics;
 
@@ -59,6 +59,7 @@ impl LogCheckpointOutput {
 impl<T: SubmitToConsensus + ReconfigurationInitiator> CheckpointOutput
     for SubmitCheckpointToConsensus<T>
 {
+    #[instrument(level = "debug", skip_all)]
     async fn checkpoint_created(
         &self,
         summary: &CheckpointSummary,
@@ -67,8 +68,15 @@ impl<T: SubmitToConsensus + ReconfigurationInitiator> CheckpointOutput
     ) -> SuiResult {
         let checkpoint_seq = summary.sequence_number;
         let checkpoint_timestamp = summary.timestamp_ms;
+        self.metrics.checkpoint_creation_latency_ms.observe(
+            summary
+                .timestamp()
+                .elapsed()
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
         debug!(
-            "Sending checkpoint signature at sequence {checkpoint_seq} to consensus, timestamp {checkpoint_timestamp}. 
+            "Sending checkpoint signature at sequence {checkpoint_seq} to consensus, timestamp {checkpoint_timestamp}.
             {}ms left till end of epoch at timestamp {}",
             self.next_reconfiguration_timestamp_ms.saturating_sub(checkpoint_timestamp), self.next_reconfiguration_timestamp_ms
         );
@@ -154,6 +162,7 @@ impl SendCheckpointToStateSync {
 
 #[async_trait]
 impl CertifiedCheckpointOutput for SendCheckpointToStateSync {
+    #[instrument(level = "debug", skip_all)]
     async fn certified_checkpoint_created(
         &self,
         summary: &CertifiedCheckpointSummary,

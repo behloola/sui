@@ -1,39 +1,53 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Disclosure } from '@headlessui/react';
+import { ChevronRight12 } from '@mysten/icons';
+import * as Collapsible from '@radix-ui/react-collapsible';
+import { cva, type VariantProps } from 'class-variance-authority';
+import clsx from 'clsx';
+import { useState, type ReactNode } from 'react';
 
-import { ReactComponent as ChevronDownIcon } from './icons/chevron_down.svg';
+const disclosureBoxStyles = cva('group', {
+	variants: {
+		variant: {
+			primary: 'bg-gray-40 rounded-lg',
+			outline:
+				'bg-transparent border border-gray-45 hover:bg-gray-40 hover:border-transparent rounded-2lg',
+		},
+	},
+	defaultVariants: {
+		variant: 'primary',
+	},
+});
 
-import type { ReactNode } from 'react';
-
-export type DisclosureBoxProps = {
-    defaultOpen?: boolean;
-    title: ReactNode;
-    children: ReactNode;
-};
+export interface DisclosureBoxProps extends VariantProps<typeof disclosureBoxStyles> {
+	defaultOpen?: boolean;
+	title: ReactNode;
+	preview?: ReactNode;
+	children: ReactNode;
+}
 
 export function DisclosureBox({
-    defaultOpen,
-    title,
-    children,
+	defaultOpen,
+	title,
+	children,
+	preview,
+	variant,
 }: DisclosureBoxProps) {
-    return (
-        <div className="rounded-lg bg-gray-40">
-            <Disclosure defaultOpen={defaultOpen}>
-                <Disclosure.Button
-                    as="div"
-                    className="flex cursor-pointer flex-nowrap items-center py-3.75 px-5"
-                >
-                    <div className="flex-1 text-body font-semibold text-gray-90">
-                        {title}
-                    </div>
-                    <ChevronDownIcon className="-rotate-90 text-gray-75 ui-open:rotate-0" />
-                </Disclosure.Button>
-                <Disclosure.Panel className="px-5 pb-5">
-                    {children}
-                </Disclosure.Panel>
-            </Disclosure>
-        </div>
-    );
+	const [open, setOpen] = useState(defaultOpen);
+	return (
+		<div className={disclosureBoxStyles({ variant })}>
+			<Collapsible.Root open={open} onOpenChange={setOpen}>
+				<Collapsible.Trigger className="flex w-full cursor-pointer flex-nowrap items-center gap-1 px-5 py-3.75">
+					<div className="flex w-11/12 flex-1 gap-1 text-body font-semibold text-gray-90">
+						{title}
+						{preview && !open ? preview : null}
+					</div>
+
+					<ChevronRight12 className={clsx('text-caption text-steel', open && 'rotate-90')} />
+				</Collapsible.Trigger>
+				<Collapsible.Content className="px-5 pb-3.75">{children}</Collapsible.Content>
+			</Collapsible.Root>
+		</div>
+	);
 }

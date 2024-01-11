@@ -48,9 +48,6 @@ pub struct Committee {
     pub voting_rights: Vec<(AuthorityName, StakeUnit)>,
     expanded_keys: HashMap<AuthorityName, AuthorityPublicKey>,
     index_map: HashMap<AuthorityName, usize>,
-    // TODO: This is no longer needed. This file needs a cleanup since we removed the optional
-    // cached expanded keys.
-    loaded: bool,
 }
 
 impl Committee {
@@ -72,7 +69,6 @@ impl Committee {
             voting_rights,
             expanded_keys,
             index_map,
-            loaded: true,
         }
     }
 
@@ -84,7 +80,7 @@ impl Committee {
         mut voting_weights: BTreeMap<AuthorityName, StakeUnit>,
     ) -> Self {
         let num_nodes = voting_weights.len();
-        let total_votes: StakeUnit = voting_weights.iter().map(|(_, votes)| *votes).sum();
+        let total_votes: StakeUnit = voting_weights.values().cloned().sum();
 
         let normalization_coef = TOTAL_VOTING_POWER as f64 / total_votes as f64;
         let mut total_sum = 0;
@@ -128,21 +124,7 @@ impl Committee {
         (expanded_keys, index_map)
     }
 
-    pub fn reload_fields(&mut self) {
-        let (expanded_keys, index_map) = Committee::load_inner(&self.voting_rights);
-        self.expanded_keys = expanded_keys;
-        self.index_map = index_map;
-        self.loaded = true;
-    }
-
     pub fn authority_index(&self, author: &AuthorityName) -> Option<u32> {
-        if !self.loaded {
-            return self
-                .voting_rights
-                .iter()
-                .position(|(a, _)| a == author)
-                .map(|i| i as u32);
-        }
         self.index_map.get(author).map(|i| *i as u32)
     }
 
@@ -186,55 +168,6 @@ impl Committee {
             .choose_multiple_weighted(rng, count, |(_, weight)| *weight as f64)
             .unwrap()
             .map(|(a, _)| a)
-    }
-
-    pub fn shuffle_by_stake(
-        &self,
-        // try these authorities first
-        preferences: Option<&BTreeSet<AuthorityName>>,
-        // only attempt from these authorities.
-        restrict_to: Option<&BTreeSet<AuthorityName>>,
-    ) -> Vec<AuthorityName> {
-        self.shuffle_by_stake_with_rng(preferences, restrict_to, &mut ThreadRng::default())
-    }
-
-    pub fn shuffle_by_stake_with_rng(
-        &self,
-        // try these authorities first
-        preferences: Option<&BTreeSet<AuthorityName>>,
-        // only attempt from these authorities.
-        restrict_to: Option<&BTreeSet<AuthorityName>>,
-        rng: &mut impl Rng,
-    ) -> Vec<AuthorityName> {
-        let restricted = self
-            .voting_rights
-            .iter()
-            .filter(|(name, _)| {
-                if let Some(restrict_to) = restrict_to {
-                    restrict_to.contains(name)
-                } else {
-                    true
-                }
-            })
-            .cloned();
-
-        let (preferred, rest): (Vec<_>, Vec<_>) = if let Some(preferences) = preferences {
-            restricted.partition(|(name, _)| preferences.contains(name))
-        } else {
-            (Vec::new(), restricted.collect())
-        };
-
-        Self::choose_multiple_weighted(&preferred, preferred.len(), rng)
-            .chain(Self::choose_multiple_weighted(&rest, rest.len(), rng))
-            .cloned()
-            .collect()
-    }
-
-    pub fn weight(&self, author: &AuthorityName) -> StakeUnit {
-        match self.voting_rights.binary_search_by_key(author, |(a, _)| *a) {
-            Err(_) => 0,
-            Ok(idx) => self.voting_rights[idx].1,
-        }
     }
 
     pub fn total_votes(&self) -> StakeUnit {
@@ -303,6 +236,47 @@ impl Committee {
     }
 }
 
+impl CommitteeTrait<AuthorityName> for Committee {
+    fn shuffle_by_stake_with_rng(
+        &self,
+        // try these authorities first
+        preferences: Option<&BTreeSet<AuthorityName>>,
+        // only attempt from these authorities.
+        restrict_to: Option<&BTreeSet<AuthorityName>>,
+        rng: &mut impl Rng,
+    ) -> Vec<AuthorityName> {
+        let restricted = self
+            .voting_rights
+            .iter()
+            .filter(|(name, _)| {
+                if let Some(restrict_to) = restrict_to {
+                    restrict_to.contains(name)
+                } else {
+                    true
+                }
+            })
+            .cloned();
+
+        let (preferred, rest): (Vec<_>, Vec<_>) = if let Some(preferences) = preferences {
+            restricted.partition(|(name, _)| preferences.contains(name))
+        } else {
+            (Vec::new(), restricted.collect())
+        };
+
+        Self::choose_multiple_weighted(&preferred, preferred.len(), rng)
+            .chain(Self::choose_multiple_weighted(&rest, rest.len(), rng))
+            .cloned()
+            .collect()
+    }
+
+    fn weight(&self, author: &AuthorityName) -> StakeUnit {
+        match self.voting_rights.binary_search_by_key(author, |(a, _)| *a) {
+            Err(_) => 0,
+            Ok(idx) => self.voting_rights[idx].1,
+        }
+    }
+}
+
 impl PartialEq for Committee {
     fn eq(&self, other: &Self) -> bool {
         self.epoch == other.epoch && self.voting_rights == other.voting_rights
@@ -328,6 +302,29 @@ impl Display for Committee {
             self.epoch, voting_rights
         )
     }
+}
+
+pub trait CommitteeTrait<K: Ord> {
+    fn shuffle_by_stake_with_rng(
+        &self,
+        // try these authorities first
+        preferences: Option<&BTreeSet<K>>,
+        // only attempt from these authorities.
+        restrict_to: Option<&BTreeSet<K>>,
+        rng: &mut impl Rng,
+    ) -> Vec<K>;
+
+    fn shuffle_by_stake(
+        &self,
+        // try these authorities first
+        preferences: Option<&BTreeSet<K>>,
+        // only attempt from these authorities.
+        restrict_to: Option<&BTreeSet<K>>,
+    ) -> Vec<K> {
+        self.shuffle_by_stake_with_rng(preferences, restrict_to, &mut ThreadRng::default())
+    }
+
+    fn weight(&self, author: &K) -> StakeUnit;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

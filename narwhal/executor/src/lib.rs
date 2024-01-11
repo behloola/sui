@@ -8,25 +8,22 @@ mod metrics;
 
 pub use errors::{SubscriberError, SubscriberResult};
 pub use state::ExecutionIndices;
-use tracing::info;
+use sui_protocol_config::ProtocolConfig;
 
 use crate::metrics::ExecutorMetrics;
+use crate::subscriber::spawn_subscriber;
+
 use async_trait::async_trait;
 use config::{AuthorityIdentifier, Committee, WorkerCache};
-
-use prometheus::Registry;
-
-use std::sync::Arc;
-use storage::CertificateStore;
-
-use crate::subscriber::spawn_subscriber;
 use mockall::automock;
-use tokio::sync::oneshot;
+use mysten_metrics::metered_channel;
+use network::client::NetworkClient;
+use prometheus::Registry;
+use std::sync::Arc;
+use storage::{CertificateStore, ConsensusStore};
 use tokio::task::JoinHandle;
-use types::{
-    metered_channel, CertificateDigest, CommittedSubDag, ConditionalBroadcastReceiver,
-    ConsensusOutput, ConsensusStore,
-};
+use tracing::info;
+use types::{CertificateDigest, CommittedSubDag, ConditionalBroadcastReceiver, ConsensusOutput};
 
 /// Convenience type representing a serialized transaction.
 pub type SerializedTransaction = Vec<u8>;
@@ -36,10 +33,9 @@ pub type SerializedTransactionDigest = u64;
 
 #[automock]
 #[async_trait]
-// Important - if you add method with the default implementation here make sure to update impl ExecutionState for Arc<T>
 pub trait ExecutionState {
     /// Execute the transaction and atomically persist the consensus index.
-    async fn handle_consensus_output(&self, consensus_output: ConsensusOutput);
+    async fn handle_consensus_output(&mut self, consensus_output: ConsensusOutput);
 
     /// Load the last executed sub-dag index from storage
     async fn last_executed_sub_dag_index(&self) -> u64;
@@ -52,9 +48,10 @@ impl Executor {
     /// Spawn a new client subscriber.
     pub fn spawn<State>(
         authority_id: AuthorityIdentifier,
-        network: oneshot::Receiver<anemo::Network>,
         worker_cache: WorkerCache,
         committee: Committee,
+        protocol_config: &ProtocolConfig,
+        client: NetworkClient,
         execution_state: State,
         shutdown_receivers: Vec<ConditionalBroadcastReceiver>,
         rx_sequence: metered_channel::Receiver<CommittedSubDag>,
@@ -72,9 +69,10 @@ impl Executor {
         // Spawn the subscriber.
         let subscriber_handle = spawn_subscriber(
             authority_id,
-            network,
             worker_cache,
             committee,
+            protocol_config.clone(),
+            client,
             shutdown_receivers,
             rx_sequence,
             arc_metrics,
@@ -105,8 +103,7 @@ pub async fn get_restored_consensus_output<State: ExecutionState>(
 
     let mut sub_dags = Vec::new();
     for compressed_sub_dag in compressed_sub_dags {
-        let sub_dag_index = compressed_sub_dag.sub_dag_index;
-        let certificate_digests: Vec<CertificateDigest> = compressed_sub_dag.certificates;
+        let certificate_digests: Vec<CertificateDigest> = compressed_sub_dag.certificates();
 
         let certificates = certificate_store
             .read_all(certificate_digests)?
@@ -114,28 +111,16 @@ pub async fn get_restored_consensus_output<State: ExecutionState>(
             .flatten()
             .collect();
 
-        let leader = certificate_store.read(compressed_sub_dag.leader)?.unwrap();
+        let leader = certificate_store
+            .read(compressed_sub_dag.leader())?
+            .unwrap();
 
-        sub_dags.push(CommittedSubDag {
+        sub_dags.push(CommittedSubDag::from_commit(
+            compressed_sub_dag,
             certificates,
             leader,
-            sub_dag_index,
-            reputation_score: compressed_sub_dag.reputation_score,
-        });
+        ));
     }
 
     Ok(sub_dags)
-}
-
-#[async_trait]
-impl<T: ExecutionState + 'static + Send + Sync> ExecutionState for Arc<T> {
-    async fn handle_consensus_output(&self, consensus_output: ConsensusOutput) {
-        self.as_ref()
-            .handle_consensus_output(consensus_output)
-            .await
-    }
-
-    async fn last_executed_sub_dag_index(&self) -> u64 {
-        self.as_ref().last_executed_sub_dag_index().await
-    }
 }

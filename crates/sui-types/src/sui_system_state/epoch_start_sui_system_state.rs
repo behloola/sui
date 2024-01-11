@@ -22,6 +22,7 @@ pub trait EpochStartSystemStateTrait {
     fn safe_mode(&self) -> bool;
     fn epoch_start_timestamp_ms(&self) -> u64;
     fn epoch_duration_ms(&self) -> u64;
+    fn get_validator_addresses(&self) -> Vec<SuiAddress>;
     fn get_sui_committee(&self) -> Committee;
     fn get_narwhal_committee(&self) -> NarwhalCommittee;
     fn get_validator_as_p2p_peers(&self, excluding_self: AuthorityName) -> Vec<PeerInfo>;
@@ -64,10 +65,6 @@ impl EpochStartSystemState {
         })
     }
 
-    pub fn new_for_testing() -> Self {
-        Self::new_for_testing_with_epoch(0)
-    }
-
     pub fn new_for_testing_with_epoch(epoch: EpochId) -> Self {
         Self::V1(EpochStartSystemStateV1::new_for_testing_with_epoch(epoch))
     }
@@ -92,8 +89,8 @@ impl EpochStartSystemStateV1 {
     pub fn new_for_testing_with_epoch(epoch: EpochId) -> Self {
         Self {
             epoch,
-            protocol_version: ProtocolVersion::MIN.as_u64(),
-            reference_gas_price: 1,
+            protocol_version: ProtocolVersion::MAX.as_u64(),
+            reference_gas_price: crate::transaction::DEFAULT_VALIDATOR_GAS_PRICE,
             safe_mode: false,
             epoch_start_timestamp_ms: 0,
             epoch_duration_ms: 1000,
@@ -127,6 +124,13 @@ impl EpochStartSystemStateTrait for EpochStartSystemStateV1 {
         self.epoch_duration_ms
     }
 
+    fn get_validator_addresses(&self) -> Vec<SuiAddress> {
+        self.active_validators
+            .iter()
+            .map(|validator| validator.sui_address)
+            .collect()
+    }
+
     fn get_sui_committee(&self) -> Committee {
         let voting_rights = self
             .active_validators
@@ -146,6 +150,7 @@ impl EpochStartSystemStateTrait for EpochStartSystemStateV1 {
                 validator.voting_power as narwhal_config::Stake,
                 validator.narwhal_primary_address.clone(),
                 validator.narwhal_network_pubkey.clone(),
+                validator.hostname.clone(),
             );
         }
 

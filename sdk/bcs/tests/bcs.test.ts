@@ -1,175 +1,174 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect } from "vitest";
-import { BCS, fromB64, getSuiMoveConfig } from "./../src/index";
+import { describe, expect, it } from 'vitest';
 
-describe("BCS: Primitives", () => {
-  it("should de/ser primitives: u8", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+import { BCS, fromB64, getSuiMoveConfig } from './../src/index';
 
-    expect(bcs.de("u8", fromB64("AQ=="))).toEqual(1);
-    expect(bcs.de("u8", fromB64("AA=="))).toEqual(0);
-  });
+describe('BCS: Primitives', () => {
+	it('should de/ser primitives: u8', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-  it("should ser/de u64", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.de('u8', fromB64('AQ=='))).toEqual(1);
+		expect(bcs.de('u8', fromB64('AA=='))).toEqual(0);
+	});
 
-    const exp = "AO/Nq3hWNBI=";
-    const num = "1311768467750121216";
-    const set = bcs.ser("u64", num).toString("base64");
+	it('should ser/de u64', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    expect(set).toEqual(exp);
-    expect(bcs.de("u64", exp, "base64")).toEqual("1311768467750121216");
-  });
+		const exp = 'AO/Nq3hWNBI=';
+		const num = '1311768467750121216';
+		const set = bcs.ser('u64', num).toString('base64');
 
-  it("should ser/de u128", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(set).toEqual(exp);
+		expect(bcs.de('u64', exp, 'base64')).toEqual('1311768467750121216');
+	});
 
-    const sample = "AO9ld3CFjD48AAAAAAAAAA==";
-    const num = BigInt("1111311768467750121216");
+	it('should ser/de u128', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    expect(bcs.de("u128", sample, "base64").toString(10)).toEqual(
-      "1111311768467750121216"
-    );
-    expect(bcs.ser("u128", num).toString("base64")).toEqual(sample);
-  });
+		const sample = 'AO9ld3CFjD48AAAAAAAAAA==';
+		const num = BigInt('1111311768467750121216');
 
-  it("should de/ser custom objects", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.de('u128', sample, 'base64').toString(10)).toEqual('1111311768467750121216');
+		expect(bcs.ser('u128', num).toString('base64')).toEqual(sample);
+	});
 
-    bcs.registerStructType("Coin", {
-      value: BCS.U64,
-      owner: BCS.STRING,
-      is_locked: BCS.BOOL,
-    });
+	it('should de/ser custom objects', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    const rustBcs = "gNGxBWAAAAAOQmlnIFdhbGxldCBHdXkA";
-    const expected = {
-      owner: "Big Wallet Guy",
-      value: "412412400000",
-      is_locked: false,
-    };
+		bcs.registerStructType('Coin', {
+			value: BCS.U64,
+			owner: BCS.STRING,
+			is_locked: BCS.BOOL,
+		});
 
-    const setBytes = bcs.ser("Coin", expected);
+		const rustBcs = 'gNGxBWAAAAAOQmlnIFdhbGxldCBHdXkA';
+		const expected = {
+			owner: 'Big Wallet Guy',
+			value: '412412400000',
+			is_locked: false,
+		};
 
-    expect(bcs.de("Coin", fromB64(rustBcs))).toEqual(expected);
-    expect(setBytes.toString("base64")).toEqual(rustBcs);
-  });
+		const setBytes = bcs.ser('Coin', expected);
 
-  it("should de/ser vectors", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.de('Coin', fromB64(rustBcs))).toEqual(expected);
+		expect(setBytes.toString('base64')).toEqual(rustBcs);
+	});
 
-    // Rust-bcs generated vector with 1000 u8 elements (FF)
-    const sample = largebcsVec();
+	it('should de/ser vectors', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    // deserialize data with JS
-    const deserialized = bcs.de("vector<u8>", fromB64(sample));
+		// Rust-bcs generated vector with 1000 u8 elements (FF)
+		const sample = largebcsVec();
 
-    // create the same vec with 1000 elements
-    let arr = Array.from(Array(1000)).map(() => 255);
-    const serialized = bcs.ser("vector<u8>", arr);
+		// deserialize data with JS
+		const deserialized = bcs.de('vector<u8>', fromB64(sample));
 
-    expect(deserialized.length).toEqual(1000);
-    expect(serialized.toString("base64")).toEqual(largebcsVec());
-  });
+		// create the same vec with 1000 elements
+		let arr = Array.from(Array(1000)).map(() => 255);
+		const serialized = bcs.ser('vector<u8>', arr);
 
-  it("should de/ser enums", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(deserialized.length).toEqual(1000);
+		expect(serialized.toString('base64')).toEqual(largebcsVec());
+	});
 
-    bcs.registerStructType("Coin", { value: "u64" });
-    bcs.registerEnumType("Enum", {
-      single: "Coin",
-      multi: "vector<Coin>",
-    });
+	it('should de/ser enums', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    // prepare 2 examples from Rust bcs
-    let example1 = fromB64("AICWmAAAAAAA");
-    let example2 = fromB64("AQIBAAAAAAAAAAIAAAAAAAAA");
+		bcs.registerStructType('Coin', { value: 'u64' });
+		bcs.registerEnumType('Enum', {
+			single: 'Coin',
+			multi: 'vector<Coin>',
+		});
 
-    // serialize 2 objects with the same data and signature
-    let set1 = bcs.ser("Enum", { single: { value: 10000000 } }).toBytes();
-    let set2 = bcs
-      .ser("Enum", {
-        multi: [{ value: 1 }, { value: 2 }],
-      })
-      .toBytes();
+		// prepare 2 examples from Rust bcs
+		let example1 = fromB64('AICWmAAAAAAA');
+		let example2 = fromB64('AQIBAAAAAAAAAAIAAAAAAAAA');
 
-    // deserialize and compare results
-    expect(bcs.de("Enum", example1)).toEqual(bcs.de("Enum", set1));
-    expect(bcs.de("Enum", example2)).toEqual(bcs.de("Enum", set2));
-  });
+		// serialize 2 objects with the same data and signature
+		let set1 = bcs.ser('Enum', { single: { value: 10000000 } }).toBytes();
+		let set2 = bcs
+			.ser('Enum', {
+				multi: [{ value: 1 }, { value: 2 }],
+			})
+			.toBytes();
 
-  it("should de/ser addresses", () => {
-    const bcs = new BCS(
-      Object.assign(getSuiMoveConfig(), {
-        addressLength: 16,
-        addressEncoding: "hex",
-      })
-    );
+		// deserialize and compare results
+		expect(bcs.de('Enum', example1)).toEqual(bcs.de('Enum', set1));
+		expect(bcs.de('Enum', example2)).toEqual(bcs.de('Enum', set2));
+	});
 
-    // Move Kitty example:
-    // Wallet { kitties: vector<Kitty>, owner: address }
-    // Kitty { id: 'u8' }
+	it('should de/ser addresses', () => {
+		const bcs = new BCS(
+			Object.assign(getSuiMoveConfig(), {
+				addressLength: 16,
+				addressEncoding: 'hex',
+			}),
+		);
 
-    // bcs.registerAddressType('address', 16, 'base64'); // Move has 16/20/32 byte addresses
-    bcs.registerStructType("Kitty", { id: "u8" });
-    bcs.registerStructType("Wallet", {
-      kitties: "vector<Kitty>",
-      owner: "address",
-    });
+		// Move Kitty example:
+		// Wallet { kitties: vector<Kitty>, owner: address }
+		// Kitty { id: 'u8' }
 
-    // Generated with Move CLI i.e. on the Move side
-    let sample = "AgECAAAAAAAAAAAAAAAAAMD/7g==";
-    let data = bcs.de("Wallet", fromB64(sample));
+		// bcs.registerAddressType('address', 16, 'base64'); // Move has 16/20/32 byte addresses
+		bcs.registerStructType('Kitty', { id: 'u8' });
+		bcs.registerStructType('Wallet', {
+			kitties: 'vector<Kitty>',
+			owner: 'address',
+		});
 
-    expect(data.kitties).toHaveLength(2);
-    expect(data.owner).toEqual("00000000000000000000000000c0ffee");
-  });
+		// Generated with Move CLI i.e. on the Move side
+		let sample = 'AgECAAAAAAAAAAAAAAAAAMD/7g==';
+		let data = bcs.de('Wallet', fromB64(sample));
 
-  it("should support growing size", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(data.kitties).toHaveLength(2);
+		expect(data.owner).toEqual('00000000000000000000000000c0ffee');
+	});
 
-    bcs.registerStructType("Coin", {
-      value: BCS.U64,
-      owner: BCS.STRING,
-      is_locked: BCS.BOOL,
-    });
+	it('should support growing size', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    const rustBcs = "gNGxBWAAAAAOQmlnIFdhbGxldCBHdXkA";
-    const expected = {
-      owner: "Big Wallet Guy",
-      value: "412412400000",
-      is_locked: false,
-    };
+		bcs.registerStructType('Coin', {
+			value: BCS.U64,
+			owner: BCS.STRING,
+			is_locked: BCS.BOOL,
+		});
 
-    const setBytes = bcs.ser("Coin", expected, { size: 1, maxSize: 1024 });
+		const rustBcs = 'gNGxBWAAAAAOQmlnIFdhbGxldCBHdXkA';
+		const expected = {
+			owner: 'Big Wallet Guy',
+			value: '412412400000',
+			is_locked: false,
+		};
 
-    expect(bcs.de("Coin", fromB64(rustBcs))).toEqual(expected);
-    expect(setBytes.toString("base64")).toEqual(rustBcs);
-  });
+		const setBytes = bcs.ser('Coin', expected, { size: 1, maxSize: 1024 });
 
-  it("should error when attempting to grow beyond the allowed size", () => {
-    const bcs = new BCS(getSuiMoveConfig());
+		expect(bcs.de('Coin', fromB64(rustBcs))).toEqual(expected);
+		expect(setBytes.toString('base64')).toEqual(rustBcs);
+	});
 
-    bcs.registerStructType("Coin", {
-      value: BCS.U64,
-      owner: BCS.STRING,
-      is_locked: BCS.BOOL,
-    });
+	it('should error when attempting to grow beyond the allowed size', () => {
+		const bcs = new BCS(getSuiMoveConfig());
 
-    const expected = {
-      owner: "Big Wallet Guy",
-      value: 412412400000n,
-      is_locked: false,
-    };
+		bcs.registerStructType('Coin', {
+			value: BCS.U64,
+			owner: BCS.STRING,
+			is_locked: BCS.BOOL,
+		});
 
-    expect(() => bcs.ser("Coin", expected, { size: 1 })).toThrowError();
-  });
+		const expected = {
+			owner: 'Big Wallet Guy',
+			value: 412412400000n,
+			is_locked: false,
+		};
+
+		expect(() => bcs.ser('Coin', expected, { size: 1 })).toThrowError();
+	});
 });
 
 // @ts-ignore
 
 function largebcsVec(): string {
-  return "6Af/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////";
+	return '6Af/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////';
 }

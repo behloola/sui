@@ -6,12 +6,13 @@ use std::{
     borrow::Borrow,
     collections::{btree_map::Iter, BTreeMap, HashMap, VecDeque},
     marker::PhantomData,
+    ops::RangeBounds,
     sync::{Arc, RwLock},
 };
 
 use crate::{
-    rocks::{be_fix_int_ser, TypedStoreError},
-    Map,
+    rocks::{be_fix_int_ser, errors::typed_store_err_from_bcs_err},
+    Map, TypedStoreError,
 };
 use bincode::Options;
 use collectable::TryExtend;
@@ -72,7 +73,7 @@ pub struct TestDBValues<'a, V> {
 }
 
 impl<'a, K: DeserializeOwned, V: DeserializeOwned> Iterator for TestDBIter<'a, K, V> {
-    type Item = (K, V);
+    type Item = Result<(K, V), TypedStoreError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut out: Option<Self::Item> = None;
@@ -87,7 +88,7 @@ impl<'a, K: DeserializeOwned, V: DeserializeOwned> Iterator for TestDBIter<'a, K
             if let Some((raw_key, raw_value)) = resp {
                 let key: K = config.deserialize(raw_key).ok().unwrap();
                 let value: V = bcs::from_bytes(raw_value).ok().unwrap();
-                out = Some((key, value));
+                out = Some(Ok((key, value)));
             }
         });
         out
@@ -171,7 +172,7 @@ impl<'a, K, V> TestDBRevIter<'a, K, V> {
 }
 
 impl<'a, K: DeserializeOwned, V: DeserializeOwned> Iterator for TestDBRevIter<'a, K, V> {
-    type Item = (K, V);
+    type Item = Result<(K, V), TypedStoreError>;
 
     /// Will give the next item backwards
     fn next(&mut self) -> Option<Self::Item> {
@@ -180,7 +181,7 @@ impl<'a, K: DeserializeOwned, V: DeserializeOwned> Iterator for TestDBRevIter<'a
 }
 
 impl<'a, K: DeserializeOwned> Iterator for TestDBKeys<'a, K> {
-    type Item = K;
+    type Item = Result<K, TypedStoreError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut out: Option<Self::Item> = None;
@@ -190,7 +191,7 @@ impl<'a, K: DeserializeOwned> Iterator for TestDBKeys<'a, K> {
                 .with_fixint_encoding();
             if let Some((raw_key, _)) = fields.iter.next() {
                 let key: K = config.deserialize(raw_key).ok().unwrap();
-                out = Some(key);
+                out = Some(Ok(key));
             }
         });
         out
@@ -198,14 +199,14 @@ impl<'a, K: DeserializeOwned> Iterator for TestDBKeys<'a, K> {
 }
 
 impl<'a, V: DeserializeOwned> Iterator for TestDBValues<'a, V> {
-    type Item = V;
+    type Item = Result<V, TypedStoreError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut out: Option<Self::Item> = None;
         self.with_mut(|fields| {
             if let Some((_, raw_value)) = fields.iter.next() {
                 let value: V = bcs::from_bytes(raw_value).ok().unwrap();
-                out = Some(value);
+                out = Some(Ok(value));
             }
         });
         out
@@ -218,7 +219,8 @@ where
     V: Serialize + DeserializeOwned,
 {
     type Error = TypedStoreError;
-    type Iterator = TestDBIter<'a, K, V>;
+    type Iterator = std::iter::Empty<(K, V)>;
+    type SafeIterator = TestDBIter<'a, K, V>;
     type Keys = TestDBKeys<'a, K>;
     type Values = TestDBValues<'a, V>;
 
@@ -244,7 +246,7 @@ where
 
     fn insert(&self, key: &K, value: &V) -> Result<(), Self::Error> {
         let raw_key = be_fix_int_ser(key)?;
-        let raw_value = bcs::to_bytes(value)?;
+        let raw_value = bcs::to_bytes(value).map_err(typed_store_err_from_bcs_err)?;
         let mut locked = self.rows.write().unwrap();
         locked.insert(raw_key, raw_value);
         Ok(())
@@ -257,7 +259,13 @@ where
         Ok(())
     }
 
-    fn clear(&self) -> Result<(), Self::Error> {
+    fn unsafe_clear(&self) -> Result<(), Self::Error> {
+        let mut locked = self.rows.write().unwrap();
+        locked.clear();
+        Ok(())
+    }
+
+    fn schedule_delete_all(&self) -> Result<(), TypedStoreError> {
         let mut locked = self.rows.write().unwrap();
         locked.clear();
         Ok(())
@@ -268,7 +276,23 @@ where
         locked.is_empty()
     }
 
-    fn iter(&'a self) -> Self::Iterator {
+    fn unbounded_iter(&'a self) -> Self::Iterator {
+        unimplemented!("unimplemented API");
+    }
+
+    fn iter_with_bounds(
+        &'a self,
+        _lower_bound: Option<K>,
+        _upper_bound: Option<K>,
+    ) -> Self::Iterator {
+        unimplemented!("unimplemented API");
+    }
+
+    fn range_iter(&'a self, _range: impl RangeBounds<K>) -> Self::Iterator {
+        unimplemented!("unimplemented API");
+    }
+
+    fn safe_iter(&'a self) -> Self::SafeIterator {
         TestDBIterBuilder {
             rows: self.rows.read().unwrap(),
             iter_builder: |rows: &mut RwLockReadGuard<'a, BTreeMap<Vec<u8>, Vec<u8>>>| rows.iter(),
@@ -276,6 +300,10 @@ where
             direction: Direction::Forward,
         }
         .build()
+    }
+
+    fn safe_range_iter(&'a self, _range: impl RangeBounds<K>) -> Self::SafeIterator {
+        unimplemented!("unimplemented API");
     }
 
     fn keys(&'a self) -> Self::Keys {
@@ -447,8 +475,8 @@ impl TestDBWriteBatch {
         from: &K,
         to: &K,
     ) -> Result<(), TypedStoreError> {
-        let raw_from = be_fix_int_ser(from.borrow()).unwrap();
-        let raw_to = be_fix_int_ser(to.borrow()).unwrap();
+        let raw_from = be_fix_int_ser(from).unwrap();
+        let raw_to = be_fix_int_ser(to).unwrap();
         self.ops.push_back(WriteBatchOp::DeleteRange((
             db.rows.clone(),
             db.name.clone(),
@@ -560,8 +588,8 @@ mod test {
         db.insert(&123456789, &"123456789".to_string())
             .expect("Failed to insert");
 
-        let mut iter = db.iter();
-        assert_eq!(Some((123456789, "123456789".to_string())), iter.next());
+        let mut iter = db.safe_iter();
+        assert_eq!(Some(Ok((123456789, "123456789".to_string()))), iter.next());
         assert_eq!(None, iter.next());
     }
 
@@ -571,11 +599,11 @@ mod test {
         db.insert(&1, &"1".to_string()).expect("Failed to insert");
         db.insert(&2, &"2".to_string()).expect("Failed to insert");
         db.insert(&3, &"3".to_string()).expect("Failed to insert");
-        let mut iter = db.iter();
+        let mut iter = db.safe_iter();
 
-        assert_eq!(Some((1, "1".to_string())), iter.next());
-        assert_eq!(Some((2, "2".to_string())), iter.next());
-        assert_eq!(Some((3, "3".to_string())), iter.next());
+        assert_eq!(Some(Ok((1, "1".to_string()))), iter.next());
+        assert_eq!(Some(Ok((2, "2".to_string()))), iter.next());
+        assert_eq!(Some(Ok((3, "3".to_string()))), iter.next());
         assert_eq!(None, iter.next());
     }
 
@@ -587,7 +615,7 @@ mod test {
             .expect("Failed to insert");
 
         let mut keys = db.keys();
-        assert_eq!(Some(123456789), keys.next());
+        assert_eq!(Some(Ok(123456789)), keys.next());
         assert_eq!(None, keys.next());
     }
 
@@ -599,7 +627,7 @@ mod test {
             .expect("Failed to insert");
 
         let mut values = db.values();
-        assert_eq!(Some("123456789".to_string()), values.next());
+        assert_eq!(Some(Ok("123456789".to_string())), values.next());
         assert_eq!(None, values.next());
     }
 
@@ -659,7 +687,7 @@ mod test {
         wb.write().expect("Failed to execute batch");
 
         for k in db.keys() {
-            assert_eq!(k % 2, 0);
+            assert_eq!(k.unwrap() % 2, 0);
         }
     }
 
@@ -694,7 +722,7 @@ mod test {
         let db: TestDB<i32, String> = TestDB::open();
 
         // Test clear of empty map
-        let _ = db.clear();
+        let _ = db.unsafe_clear();
 
         let keys_vals = (0..101).map(|i| (i, i.to_string()));
         let mut wb = db.batch();
@@ -704,17 +732,17 @@ mod test {
         wb.write().expect("Failed to execute batch");
 
         // Check we have multiple entries
-        assert!(db.iter().count() > 1);
-        let _ = db.clear();
-        assert_eq!(db.iter().count(), 0);
+        assert!(db.safe_iter().count() > 1);
+        let _ = db.unsafe_clear();
+        assert_eq!(db.safe_iter().count(), 0);
         // Clear again to ensure safety when clearing empty map
-        let _ = db.clear();
-        assert_eq!(db.iter().count(), 0);
+        let _ = db.unsafe_clear();
+        assert_eq!(db.safe_iter().count(), 0);
         // Clear with one item
         let _ = db.insert(&1, &"e".to_string());
-        assert_eq!(db.iter().count(), 1);
-        let _ = db.clear();
-        assert_eq!(db.iter().count(), 0);
+        assert_eq!(db.safe_iter().count(), 1);
+        let _ = db.unsafe_clear();
+        assert_eq!(db.safe_iter().count(), 0);
     }
 
     #[test]
@@ -723,7 +751,7 @@ mod test {
 
         // Test empty map is truly empty
         assert!(db.is_empty());
-        let _ = db.clear();
+        let _ = db.unsafe_clear();
         assert!(db.is_empty());
 
         let keys_vals = (0..101).map(|i| (i, i.to_string()));
@@ -734,12 +762,12 @@ mod test {
         wb.write().expect("Failed to execute batch");
 
         // Check we have multiple entries and not empty
-        assert!(db.iter().count() > 1);
+        assert!(db.safe_iter().count() > 1);
         assert!(!db.is_empty());
 
         // Clear again to ensure empty works after clearing
-        let _ = db.clear();
-        assert_eq!(db.iter().count(), 0);
+        let _ = db.unsafe_clear();
+        assert_eq!(db.safe_iter().count(), 0);
         assert!(db.is_empty());
     }
 
@@ -780,7 +808,7 @@ mod test {
         // Remove 50 items
         db.multi_remove(keys_vals.clone().map(|kv| kv.0).take(50))
             .expect("Failed to multi-remove");
-        assert_eq!(db.iter().count(), 101 - 50);
+        assert_eq!(db.safe_iter().count(), 101 - 50);
 
         // Check that the remaining are present
         for (k, v) in keys_vals.skip(50) {

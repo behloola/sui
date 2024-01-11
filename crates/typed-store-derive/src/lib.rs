@@ -170,7 +170,6 @@ fn extract_generics_names(generics: &Generics) -> Vec<Ident> {
 /// use typed_store::rocks::DBOptions;
 /// use typed_store::rocks::DBMap;
 /// use typed_store::rocks::MetricConf;
-/// use typed_store::Store;
 /// use typed_store_derive::DBMapUtils;
 /// use typed_store::traits::TypedStoreDebug;
 /// use typed_store::traits::TableSummary;
@@ -228,7 +227,6 @@ fn extract_generics_names(generics: &Generics) -> Vec<Ident> {
 ///```
 /// use typed_store::rocks::DBOptions;
 /// use typed_store::rocks::DBMap;
-/// use typed_store::Store;
 /// use typed_store_derive::DBMapUtils;
 /// use typed_store::traits::TypedStoreDebug;
 /// use core::fmt::Error;
@@ -289,13 +287,8 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
     let generics = &input.generics;
     let generics_names = extract_generics_names(generics);
 
-    let allowed_types_with_post_process_fn: BTreeMap<_, _> = [
-        ("SallyColumn", ""),
-        ("DBMap", ""),
-        ("Store", "typed_store::Store::new"),
-    ]
-    .into_iter()
-    .collect();
+    let allowed_types_with_post_process_fn: BTreeMap<_, _> =
+        [("SallyColumn", ""), ("DBMap", "")].into_iter().collect();
     let allowed_strs = allowed_types_with_post_process_fn
         .keys()
         .map(|s| s.to_string())
@@ -423,14 +416,14 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                     };
                     // Safe to call unwrap because we will have at least one field_name entry in the struct
                     let rwopt_cfs: std::collections::HashMap<String, typed_store::rocks::ReadWriteOptions> = opt_cfs.iter().map(|q| (q.0.as_str().to_string(), q.1.rw_options.clone())).collect();
-                    let opt_cfs: Vec<_> = opt_cfs.iter().map(|q| (q.0.as_str(), &q.1.options)).collect();
+                    let opt_cfs: Vec<_> = opt_cfs.iter().map(|q| (q.0.as_str(), q.1.options.clone())).collect();
                     let db = match (as_secondary_with_path, is_transaction) {
                         (Some(p), _) => typed_store::rocks::open_cf_opts_secondary(path, Some(&p), global_db_options_override, metric_conf, &opt_cfs),
                         (_, true) => typed_store::rocks::open_cf_opts_transactional(path, global_db_options_override, metric_conf, &opt_cfs),
                         _ => typed_store::rocks::open_cf_opts(path, global_db_options_override, metric_conf, &opt_cfs)
                     };
                     db.map(|d| (d, rwopt_cfs))
-                }.expect("Cannot open DB.");
+                }.expect(&format!("Cannot open DB at {:?}", path));
                 let (
                         #(
                             #field_names
@@ -557,7 +550,7 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                     #(
                         stringify!(#field_names) => {
                             typed_store::traits::Map::try_catch_up_with_primary(&self.#field_names)?;
-                            typed_store::traits::Map::iter(&self.#field_names)
+                            typed_store::traits::Map::unbounded_iter(&self.#field_names)
                                 .skip((page_number * (page_size) as usize))
                                 .take(page_size as usize)
                                 .map(|(k, v)| (format!("{:?}", k), format!("{:?}", v)))
@@ -594,7 +587,7 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                     #(
                         stringify!(#field_names) => {
                             typed_store::traits::Map::try_catch_up_with_primary(&self.#field_names)?;
-                            typed_store::traits::Map::iter(&self.#field_names).count()
+                            typed_store::traits::Map::unbounded_iter(&self.#field_names).count()
                         }
                     )*
 
@@ -606,6 +599,15 @@ pub fn derive_dbmap_utils_general(input: TokenStream) -> TokenStream {
                 vec![#(
                     (stringify!(#field_names).to_owned(), (stringify!(#key_names).to_owned(), stringify!(#value_names).to_owned())),
                 )*].into_iter().collect()
+            }
+
+            /// Try catch up with primary for all tables. This can be a slow operation
+            /// Tables must be opened in read only mode using `open_tables_read_only`
+            pub fn try_catch_up_with_primary_all(&self) -> eyre::Result<()> {
+                #(
+                    typed_store::traits::Map::try_catch_up_with_primary(&self.#field_names)?;
+                )*
+                Ok(())
             }
         }
 
@@ -796,13 +798,13 @@ pub fn derive_sallydb_general(input: TokenStream) -> TokenStream {
                             };
                             // Safe to call unwrap because we will have at least one field_name entry in the struct
                             let rwopt_cfs: std::collections::HashMap<String, typed_store::rocks::ReadWriteOptions> = opt_cfs.iter().map(|q| (q.0.as_str().to_string(), q.1.rw_options.clone())).collect();
-                            let opt_cfs: Vec<_> = opt_cfs.iter().map(|q| (q.0.as_str(), &q.1.options)).collect();
+                            let opt_cfs: Vec<_> = opt_cfs.iter().map(|q| (q.0.as_str(), q.1.options.clone())).collect();
                             let db = match access_type {
                                 RocksDBAccessType::Secondary(Some(p)) => typed_store::rocks::open_cf_opts_secondary(path, Some(&p), global_db_options_override, metric_conf, &opt_cfs),
                                 _ => typed_store::rocks::open_cf_opts(path, global_db_options_override, metric_conf, &opt_cfs)
                             };
                             db.map(|d| (d, rwopt_cfs))
-                        }.expect("Cannot open DB.");
+                        }.expect(&format!("Cannot open DB at {:?}", path));
                         let (
                             #(
                                 #field_names
@@ -915,7 +917,7 @@ pub fn derive_sallydb_general(input: TokenStream) -> TokenStream {
                             match &self.#field_names {
                                 SallyColumn::RocksDB((db_map, typed_store::sally::SallyConfig { mode: typed_store::sally::SallyRunMode::FallbackToDB })) => {
                                     typed_store::traits::Map::try_catch_up_with_primary(db_map)?;
-                                    typed_store::traits::Map::iter(db_map)
+                                    typed_store::traits::Map::unbounded_iter(db_map)
                                         .skip((page_number * (page_size) as usize))
                                         .take(page_size as usize)
                                         .map(|(k, v)| (format!("{:?}", k), format!("{:?}", v)))
@@ -959,7 +961,7 @@ pub fn derive_sallydb_general(input: TokenStream) -> TokenStream {
                             match &self.#field_names {
                                 SallyColumn::RocksDB((db_map, typed_store::sally::SallyConfig { mode: typed_store::sally::SallyRunMode::FallbackToDB })) => {
                                     typed_store::traits::Map::try_catch_up_with_primary(db_map)?;
-                                    typed_store::traits::Map::iter(db_map).count()
+                                    typed_store::traits::Map::unbounded_iter(db_map).count()
                                 }
                                 _ => unimplemented!(),
                             }

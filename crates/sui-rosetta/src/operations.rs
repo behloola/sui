@@ -14,19 +14,19 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use sui_json_rpc_types::SuiProgrammableMoveCall;
-use sui_json_rpc_types::SuiProgrammableTransaction;
+use sui_json_rpc_types::SuiProgrammableTransactionBlock;
 use sui_json_rpc_types::{BalanceChange, SuiArgument};
 use sui_json_rpc_types::{SuiCallArg, SuiCommand};
 use sui_sdk::rpc_types::{
-    SuiTransactionData, SuiTransactionDataAPI, SuiTransactionEffectsAPI, SuiTransactionKind,
-    SuiTransactionResponse,
+    SuiTransactionBlockData, SuiTransactionBlockDataAPI, SuiTransactionBlockEffectsAPI,
+    SuiTransactionBlockKind, SuiTransactionBlockResponse,
 };
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress};
 use sui_types::gas_coin::{GasCoin, GAS};
 use sui_types::governance::{ADD_STAKE_FUN_NAME, WITHDRAW_STAKE_FUN_NAME};
-use sui_types::messages::TransactionData;
 use sui_types::object::Owner;
 use sui_types::sui_system_state::SUI_SYSTEM_MODULE_NAME;
+use sui_types::transaction::TransactionData;
 use sui_types::{SUI_SYSTEM_ADDRESS, SUI_SYSTEM_PACKAGE_ID};
 
 use crate::types::{
@@ -64,7 +64,7 @@ impl IntoIterator for Operations {
 
 impl Operations {
     pub fn new(mut ops: Vec<Operation>) -> Self {
-        for (index, mut op) in ops.iter_mut().enumerate() {
+        for (index, op) in ops.iter_mut().enumerate() {
             op.operation_identifier = (index as u64).into()
         }
         Self(ops)
@@ -169,7 +169,9 @@ impl Operations {
         };
 
         let OperationMetadata::Stake { validator } = metadata else {
-            return Err(Error::InvalidInput("Cannot find delegation info from metadata.".into()))
+            return Err(Error::InvalidInput(
+                "Cannot find delegation info from metadata.".into(),
+            ));
         };
 
         Ok(InternalOperation::Stake {
@@ -199,7 +201,9 @@ impl Operations {
 
         let stake_ids = if let Some(metadata) = op.metadata {
             let OperationMetadata::WithdrawStake { stake_ids } = metadata else {
-                return Err(Error::InvalidInput("Cannot find withdraw stake info from metadata.".into()))
+                return Err(Error::InvalidInput(
+                    "Cannot find withdraw stake info from metadata.".into(),
+                ));
             };
             stake_ids
         } else {
@@ -210,12 +214,12 @@ impl Operations {
     }
 
     fn from_transaction(
-        tx: SuiTransactionKind,
+        tx: SuiTransactionBlockKind,
         sender: SuiAddress,
         status: Option<OperationStatus>,
     ) -> Result<Vec<Operation>, Error> {
         Ok(match tx {
-            SuiTransactionKind::ProgrammableTransaction(pt) => {
+            SuiTransactionBlockKind::ProgrammableTransaction(pt) => {
                 Self::parse_programmable_transaction(sender, status, pt)?
             }
             _ => vec![Operation::generic_op(status, sender, tx)],
@@ -225,7 +229,7 @@ impl Operations {
     fn parse_programmable_transaction(
         sender: SuiAddress,
         status: Option<OperationStatus>,
-        pt: SuiProgrammableTransaction,
+        pt: SuiProgrammableTransactionBlock,
     ) -> Result<Vec<Operation>, Error> {
         #[derive(Debug)]
         enum KnownValue {
@@ -356,7 +360,7 @@ impl Operations {
             };
             Ok(id.cloned())
         }
-        let SuiProgrammableTransaction { inputs, commands } = &pt;
+        let SuiProgrammableTransactionBlock { inputs, commands } = &pt;
         let mut known_results: Vec<Vec<KnownValue>> = vec![];
         let mut aggregated_recipients: HashMap<SuiAddress, u64> = HashMap::new();
         let mut needs_generic = false;
@@ -433,7 +437,7 @@ impl Operations {
             operations.push(Operation::generic_op(
                 status,
                 sender,
-                SuiTransactionKind::ProgrammableTransaction(pt),
+                SuiTransactionBlockKind::ProgrammableTransaction(pt),
             ))
         }
         Ok(operations)
@@ -487,9 +491,9 @@ impl Operations {
     }
 }
 
-impl TryFrom<SuiTransactionData> for Operations {
+impl TryFrom<SuiTransactionBlockData> for Operations {
     type Error = Error;
-    fn try_from(data: SuiTransactionData) -> Result<Self, Self::Error> {
+    fn try_from(data: SuiTransactionBlockData) -> Result<Self, Self::Error> {
         let sender = *data.sender();
         Ok(Self::new(Self::from_transaction(
             data.transaction().clone(),
@@ -499,9 +503,9 @@ impl TryFrom<SuiTransactionData> for Operations {
     }
 }
 
-impl TryFrom<SuiTransactionResponse> for Operations {
+impl TryFrom<SuiTransactionBlockResponse> for Operations {
     type Error = Error;
-    fn try_from(response: SuiTransactionResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: SuiTransactionBlockResponse) -> Result<Self, Self::Error> {
         let tx = response
             .transaction
             .ok_or_else(|| anyhow!("Response input should not be empty"))?;
@@ -511,9 +515,9 @@ impl TryFrom<SuiTransactionResponse> for Operations {
             .ok_or_else(|| anyhow!("Response effects should not be empty"))?;
         let gas_owner = effect.gas_object().owner.get_owner_address()?;
         let gas_summary = effect.gas_cost_summary();
-        let gas_used = <u64>::from(gas_summary.storage_rebate) as i128
-            - <u64>::from(gas_summary.storage_cost) as i128
-            - <u64>::from(gas_summary.computation_cost) as i128;
+        let gas_used = gas_summary.storage_rebate as i128
+            - gas_summary.storage_cost as i128
+            - gas_summary.computation_cost as i128;
 
         let status = Some(effect.into_status().into());
         let ops: Operations = tx.data.try_into()?;
@@ -606,7 +610,7 @@ impl TryFrom<TransactionData> for Operations {
             }
         }
         // Rosetta don't need the call args to be parsed into readable format
-        SuiTransactionData::try_from(data, &&mut NoOpsModuleResolver)?.try_into()
+        SuiTransactionBlockData::try_from(data, &&mut NoOpsModuleResolver)?.try_into()
     }
 }
 
@@ -640,7 +644,7 @@ impl PartialEq for Operation {
 
 #[derive(Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
 pub enum OperationMetadata {
-    GenericTransaction(SuiTransactionKind),
+    GenericTransaction(SuiTransactionBlockKind),
     Stake { validator: SuiAddress },
     WithdrawStake { stake_ids: Vec<ObjectID> },
 }
@@ -649,7 +653,7 @@ impl Operation {
     fn generic_op(
         status: Option<OperationStatus>,
         sender: SuiAddress,
-        tx: SuiTransactionKind,
+        tx: SuiTransactionBlockKind,
     ) -> Self {
         Operation {
             operation_identifier: Default::default(),

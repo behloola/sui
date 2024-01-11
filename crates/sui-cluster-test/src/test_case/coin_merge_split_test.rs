@@ -4,9 +4,10 @@
 use crate::{helper::ObjectChecker, TestCaseImpl, TestContext};
 use async_trait::async_trait;
 use jsonrpsee::rpc_params;
-use sui_json_rpc_types::{SuiTransactionEffectsAPI, SuiTransactionResponse};
+use sui_json_rpc_types::{SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::object::Owner;
+use sui_types::sui_serde::BigInt;
 use tracing::{debug, info};
 
 pub struct CoinMergeSplitTest;
@@ -22,17 +23,19 @@ impl TestCaseImpl for CoinMergeSplitTest {
     }
 
     async fn run(&self, ctx: &mut TestContext) -> Result<(), anyhow::Error> {
-        let mut sui_objs = ctx.get_sui_from_faucet(Some(2)).await;
+        let mut sui_objs = ctx.get_sui_from_faucet(Some(1)).await;
         let gas_obj = sui_objs.swap_remove(0);
 
         let signer = ctx.get_wallet_address();
-        let primary_coin = sui_objs.swap_remove(0);
+        let mut sui_objs_2 = ctx.get_sui_from_faucet(Some(1)).await;
+
+        let primary_coin = sui_objs_2.swap_remove(0);
         let primary_coin_id = *primary_coin.id();
         let original_value = primary_coin.value();
 
         // Split
         info!("Testing coin split.");
-        let amounts = vec![1, (original_value - 2) / 2];
+        let amounts = vec![1.into(), ((original_value - 2) / 2).into()];
 
         let response =
             Self::split_coin(ctx, signer, *primary_coin.id(), amounts, *gas_obj.id()).await;
@@ -117,8 +120,14 @@ impl CoinMergeSplitTest {
         primary_coin: ObjectID,
         coin_to_merge: ObjectID,
         gas_obj_id: ObjectID,
-    ) -> SuiTransactionResponse {
-        let params = rpc_params![signer, primary_coin, coin_to_merge, Some(gas_obj_id), 2000];
+    ) -> SuiTransactionBlockResponse {
+        let params = rpc_params![
+            signer,
+            primary_coin,
+            coin_to_merge,
+            Some(gas_obj_id),
+            (20_000_000).to_string()
+        ];
 
         let data = ctx
             .build_transaction_remotely("unsafe_mergeCoins", params)
@@ -132,10 +141,16 @@ impl CoinMergeSplitTest {
         ctx: &TestContext,
         signer: SuiAddress,
         primary_coin: ObjectID,
-        amounts: Vec<u64>,
+        amounts: Vec<BigInt<u64>>,
         gas_obj_id: ObjectID,
-    ) -> SuiTransactionResponse {
-        let params = rpc_params![signer, primary_coin, amounts, Some(gas_obj_id), 2000];
+    ) -> SuiTransactionBlockResponse {
+        let params = rpc_params![
+            signer,
+            primary_coin,
+            amounts,
+            Some(gas_obj_id),
+            (20_000_000).to_string()
+        ];
 
         let data = ctx
             .build_transaction_remotely("unsafe_splitCoin", params)

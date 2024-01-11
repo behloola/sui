@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use sui_config::p2p::{DiscoveryConfig, P2pConfig, SeedPeer};
+use sui_config::p2p::{AccessType, DiscoveryConfig, P2pConfig, SeedPeer};
 use sui_types::multiaddr::Multiaddr;
 use tap::{Pipe, TapFallible};
 use tokio::sync::broadcast::error::RecvError;
@@ -28,6 +28,7 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/sui.Discovery.rs"));
 }
 mod builder;
+mod metrics;
 mod server;
 #[cfg(test)]
 mod tests;
@@ -38,6 +39,8 @@ pub use generated::{
     discovery_server::{Discovery, DiscoveryServer},
 };
 pub use server::GetKnownPeersResponse;
+
+use self::metrics::Metrics;
 
 /// The internal discovery state shared between the main event loop and the request handler
 struct State {
@@ -59,6 +62,9 @@ pub struct NodeInfo {
     ///
     /// This is used to determine which of two NodeInfo's from the same PeerId should be retained.
     pub timestamp_ms: u64,
+
+    /// See docstring for `AccessType`.
+    pub access_type: AccessType,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -68,7 +74,8 @@ pub struct TrustedPeerChangeEvent {
 
 struct DiscoveryEventLoop {
     config: P2pConfig,
-    discovery_config: DiscoveryConfig,
+    discovery_config: Arc<DiscoveryConfig>,
+    allowlisted_peers: Arc<HashMap<PeerId, Option<Multiaddr>>>,
     network: Network,
     tasks: JoinSet<()>,
     pending_dials: HashMap<PeerId, AbortHandle>,
@@ -76,6 +83,7 @@ struct DiscoveryEventLoop {
     shutdown_handle: oneshot::Receiver<()>,
     state: Arc<RwLock<State>>,
     trusted_peer_change_rx: watch::Receiver<TrustedPeerChangeEvent>,
+    metrics: Metrics,
 }
 
 impl DiscoveryEventLoop {
@@ -105,7 +113,19 @@ impl DiscoveryEventLoop {
                     self.handle_trusted_peer_change_event(event);
                 }
                 Some(task_result) = self.tasks.join_next() => {
-                    task_result.unwrap();
+                    match task_result {
+                        Ok(()) => {},
+                        Err(e) => {
+                            if e.is_cancelled() {
+                                // avoid crashing on ungraceful shutdown
+                            } else if e.is_panic() {
+                                // propagate panics.
+                                std::panic::resume_unwind(e.into_panic());
+                            } else {
+                                panic!("task failed: {e}");
+                            }
+                        },
+                    };
                 },
                 // Once the shutdown notification resolves we can terminate the event loop
                 _ = &mut self.shutdown_handle => {
@@ -133,28 +153,40 @@ impl DiscoveryEventLoop {
             peer_id: self.network.peer_id(),
             addresses: address,
             timestamp_ms: now_unix(),
+            access_type: self.discovery_config.access_type(),
         };
 
         self.state.write().unwrap().our_info = Some(our_info);
     }
 
     fn configure_preferred_peers(&mut self) {
-        for SeedPeer { peer_id, address } in self.config.seed_peers.iter() {
-            let Some(peer_id) = *peer_id else {
-                continue;
+        for (peer_id, address) in self
+            .discovery_config
+            .allowlisted_peers
+            .iter()
+            .map(|sp| (sp.peer_id, sp.address.clone()))
+            .chain(self.config.seed_peers.iter().filter_map(|ap| {
+                ap.peer_id
+                    .map(|peer_id| (peer_id, Some(ap.address.clone())))
+            }))
+        {
+            let anemo_address = if let Some(address) = address {
+                let Ok(address) = address.to_anemo_address() else {
+                    debug!(p2p_address=?address, "Can't convert p2p address to anemo address");
+                    continue;
+                };
+                Some(address)
+            } else {
+                None
             };
 
-            let Ok(address) = address.to_anemo_address() else {
-                debug!(p2p_address=?address, "Can't convert p2p address to anemo address");
-                continue;
-            };
-
+            // TODO: once we have `PeerAffinity::Allowlisted` we should update allowlisted peers'
+            // affinity.
             let peer_info = anemo::types::PeerInfo {
                 peer_id,
                 affinity: anemo::types::PeerAffinity::High,
-                address: vec![address],
+                address: anemo_address.into_iter().collect(),
             };
-
             self.network.known_peers().insert(peer_info);
         }
     }
@@ -188,8 +220,12 @@ impl DiscoveryEventLoop {
                         .insert(peer_id, ());
 
                     // Query the new node for any peers
-                    self.tasks
-                        .spawn(query_peer_for_their_known_peers(peer, self.state.clone()));
+                    self.tasks.spawn(query_peer_for_their_known_peers(
+                        peer,
+                        self.state.clone(),
+                        self.metrics.clone(),
+                        self.allowlisted_peers.clone(),
+                    ));
                 }
             }
             Ok(PeerEvent::LostPeer(peer_id, _)) => {
@@ -214,6 +250,8 @@ impl DiscoveryEventLoop {
                 self.network.clone(),
                 self.discovery_config.clone(),
                 self.state.clone(),
+                self.metrics.clone(),
+                self.allowlisted_peers.clone(),
             ));
 
         // Cull old peers older than a day
@@ -309,7 +347,7 @@ async fn try_to_connect_to_peer(network: Network, info: NodeInfo) {
 
 async fn try_to_connect_to_seed_peers(
     network: Network,
-    config: DiscoveryConfig,
+    config: Arc<DiscoveryConfig>,
     seed_peers: Vec<SeedPeer>,
 ) {
     let network = &network;
@@ -335,7 +373,12 @@ async fn try_to_connect_to_seed_peers(
     .await;
 }
 
-async fn query_peer_for_their_known_peers(peer: Peer, state: Arc<RwLock<State>>) {
+async fn query_peer_for_their_known_peers(
+    peer: Peer,
+    state: Arc<RwLock<State>>,
+    metrics: Metrics,
+    allowlisted_peers: Arc<HashMap<PeerId, Option<Multiaddr>>>,
+) {
     let mut client = DiscoveryClient::new(peer);
 
     let request = Request::new(()).with_timeout(TIMEOUT);
@@ -356,14 +399,16 @@ async fn query_peer_for_their_known_peers(peer: Peer, state: Arc<RwLock<State>>)
             },
         )
     {
-        update_known_peers(state, found_peers);
+        update_known_peers(state, metrics, found_peers, allowlisted_peers);
     }
 }
 
 async fn query_connected_peers_for_their_known_peers(
     network: Network,
-    config: DiscoveryConfig,
+    config: Arc<DiscoveryConfig>,
     state: Arc<RwLock<State>>,
+    metrics: Metrics,
+    allowlisted_peers: Arc<HashMap<PeerId, Option<Multiaddr>>>,
 ) {
     use rand::seq::IteratorRandom;
 
@@ -400,10 +445,15 @@ async fn query_connected_peers_for_their_known_peers(
         .collect::<Vec<_>>()
         .await;
 
-    update_known_peers(state, found_peers);
+    update_known_peers(state, metrics, found_peers, allowlisted_peers);
 }
 
-fn update_known_peers(state: Arc<RwLock<State>>, found_peers: Vec<NodeInfo>) {
+fn update_known_peers(
+    state: Arc<RwLock<State>>,
+    metrics: Metrics,
+    found_peers: Vec<NodeInfo>,
+    allowlisted_peers: Arc<HashMap<PeerId, Option<Multiaddr>>>,
+) {
     use std::collections::hash_map::Entry;
 
     let now_unix = now_unix();
@@ -422,13 +472,28 @@ fn update_known_peers(state: Arc<RwLock<State>>, found_peers: Vec<NodeInfo>) {
             continue;
         }
 
+        // If Peer is Private, and not in our allowlist, skip it.
+        if peer.access_type == AccessType::Private && !allowlisted_peers.contains_key(&peer.peer_id)
+        {
+            continue;
+        }
+
         match known_peers.entry(peer.peer_id) {
             Entry::Occupied(mut o) => {
                 if peer.timestamp_ms > o.get().timestamp_ms {
+                    if o.get().addresses.is_empty() && !peer.addresses.is_empty() {
+                        metrics.inc_num_peers_with_external_address();
+                    }
+                    if !o.get().addresses.is_empty() && peer.addresses.is_empty() {
+                        metrics.dec_num_peers_with_external_address();
+                    }
                     o.insert(peer);
                 }
             }
             Entry::Vacant(v) => {
+                if !peer.addresses.is_empty() {
+                    metrics.inc_num_peers_with_external_address();
+                }
                 v.insert(peer);
             }
         }

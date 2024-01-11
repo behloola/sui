@@ -1,5 +1,5 @@
 <p align="center">
-<img src="https://github.com/MystenLabs/sui/blob/main/doc/static/Sui_Icon_Brand.png" alt="Logo" width="100" height="100">
+<img src="https://github.com/MystenLabs/sui/blob/main/docs/site/static/img/logo.svg" alt="Logo" width="100" height="100">
 </p>
 
 # Welcome to Sui
@@ -15,7 +15,7 @@ Sui offers the following benefits and capabilities:
  * Ability to define rich and composable on-chain assets
  * Better user experience for web3 apps
 
-Sui is the only blockchain today that can scale with the growth of web3 while achieving industry-leading performance, cost, programmability, and usability. As we push towards mainnet launch, we will demonstrate capacity beyond the transaction processing capabilities of established systems – traditional and blockchain alike. We see Sui as the first internet-scale programmable blockchain platform, a foundational layer for web3.
+Sui is the only blockchain today that can scale with the growth of web3 while achieving industry-leading performance, cost, programmability, and usability. As Sui approaches Mainnet launch, it will demonstrate capacity beyond the transaction processing capabilities of established systems – traditional and blockchain alike. Sui is the first internet-scale programmable blockchain platform, a foundational layer for web3.
 
 ## Sui Architecture
 
@@ -52,7 +52,7 @@ Sui is backed by a number of state-of-the-art [peer-reviewed works](https://gith
 
 Use the following links to learn more about Sui and the Sui ecosystem:
 
- * Learn more about working with Sui in the [Sui Documentation](doc/src/learn/index.md).
+ * Learn more about working with Sui in the [Sui Documentation](https://docs.sui.io/).
  * Join the Sui community on [Sui Discord](https://discord.gg/sui).
  * Find out more about the Sui ecosystem on the [Sui Resources](https://sui.io/resources/) page.
- * Review information about Sui governance, [decentralization](https://suifoundation.org/decentralization), and [Developer Grants Program](https://suifoundation.org/#grants) on the [Sui Foundation](https://suifoundation.org/) site. 
+ * Review information about Sui governance, [decentralization](https://suifoundation.org/decentralization), and [Developer Grants Program](https://sui.io/grants-hub) on the [Sui Foundation](https://suifoundation.org/) site.

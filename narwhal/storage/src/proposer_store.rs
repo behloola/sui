@@ -1,9 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::StoreResult;
 use store::rocks::{open_cf, MetricConf};
 use store::{reopen, rocks::DBMap, rocks::ReadWriteOptions, Map};
-use types::{Header, StoreResult};
+use sui_macros::fail_point;
+use types::Header;
 
 pub type ProposerKey = u32;
 
@@ -35,8 +37,14 @@ impl ProposerStore {
     }
 
     /// Inserts a proposed header into the store
+    #[allow(clippy::let_and_return)]
     pub fn write_last_proposed(&self, header: &Header) -> StoreResult<()> {
-        self.last_proposed.insert(&LAST_PROPOSAL_KEY, header)
+        fail_point!("narwhal-store-before-write");
+
+        let result = self.last_proposed.insert(&LAST_PROPOSAL_KEY, header);
+
+        fail_point!("narwhal-store-after-write");
+        result
     }
 
     /// Get the last header
@@ -49,23 +57,27 @@ impl ProposerStore {
 mod test {
     use crate::{ProposerStore, LAST_PROPOSAL_KEY};
     use store::Map;
-    use test_utils::{fixture_batch_with_transactions, CommitteeFixture};
+    use test_utils::{fixture_batch_with_transactions, latest_protocol_version, CommitteeFixture};
     use types::{CertificateDigest, Header, Round};
 
     pub fn create_header_for_round(round: Round) -> Header {
-        let builder = types::HeaderV1Builder::default();
+        let builder = types::HeaderV2Builder::default();
         let fixture = CommitteeFixture::builder().randomize_ports(true).build();
         let primary = fixture.authorities().next().unwrap();
         let id = primary.id();
         let header = builder
             .author(id)
             .round(round)
-            .epoch(0)
+            .epoch(fixture.committee().epoch())
             .parents([CertificateDigest::default()].iter().cloned().collect())
-            .with_payload_batch(fixture_batch_with_transactions(10), 0, 0)
+            .with_payload_batch(
+                fixture_batch_with_transactions(10, &latest_protocol_version()),
+                0,
+                0,
+            )
             .build()
             .unwrap();
-        Header::V1(header)
+        Header::V2(header)
     }
 
     #[tokio::test]

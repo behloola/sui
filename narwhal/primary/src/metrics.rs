@@ -1,7 +1,5 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use crate::EndpointMetrics;
-use mysten_network::metrics::MetricsCallbackProvider;
 use network::metrics::{NetworkConnectionMetrics, NetworkMetrics};
 use prometheus::{
     core::{AtomicI64, GenericGauge},
@@ -11,8 +9,6 @@ use prometheus::{
     register_int_gauge_with_registry, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Registry,
 };
-use std::time::Duration;
-use tonic::Code;
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.4,
@@ -22,7 +18,6 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
 
 #[derive(Clone)]
 pub(crate) struct Metrics {
-    pub(crate) endpoint_metrics: Option<EndpointMetrics>,
     pub(crate) inbound_network_metrics: Option<NetworkMetrics>,
     pub(crate) outbound_network_metrics: Option<NetworkMetrics>,
     pub(crate) primary_channel_metrics: Option<PrimaryChannelMetrics>,
@@ -32,9 +27,6 @@ pub(crate) struct Metrics {
 
 /// Initialises the metrics
 pub(crate) fn initialise_metrics(metrics_registry: &Registry) -> Metrics {
-    // The metrics used for the gRPC primary node endpoints we expose to the external consensus
-    let endpoint_metrics = EndpointMetrics::new(metrics_registry);
-
     // The metrics used for communicating over the network
     let inbound_network_metrics = NetworkMetrics::new("primary", "inbound", metrics_registry);
     let outbound_network_metrics = NetworkMetrics::new("primary", "outbound", metrics_registry);
@@ -50,7 +42,6 @@ pub(crate) fn initialise_metrics(metrics_registry: &Registry) -> Metrics {
 
     Metrics {
         node_metrics: Some(node_metrics),
-        endpoint_metrics: Some(endpoint_metrics),
         primary_channel_metrics: Some(primary_channel_metrics),
         inbound_network_metrics: Some(inbound_network_metrics),
         outbound_network_metrics: Some(outbound_network_metrics),
@@ -64,34 +55,41 @@ pub struct PrimaryChannelMetrics {
     pub tx_others_digests: IntGauge,
     /// occupancy of the channel from the `primary::WorkerReceiverHandler` to the `primary::Proposer`
     pub tx_our_digests: IntGauge,
+    /// occupancy of the channel from the `primary::StateHandler` to the `primary::Proposer`
+    pub tx_system_messages: IntGauge,
     /// occupancy of the channel from the `primary::Synchronizer` to the `primary::Proposer`
     pub tx_parents: IntGauge,
     /// occupancy of the channel from the `primary::Proposer` to the `primary::Certifier`
     pub tx_headers: IntGauge,
     /// occupancy of the channel from the `primary::Synchronizer` to the `primary::CertificaterWaiter`
     pub tx_certificate_fetcher: IntGauge,
-    /// occupancy of the channel from the `primary::BlockSynchronizerHandler` to the `primary::BlockSynchronizer`
-    pub tx_block_synchronizer_commands: IntGauge,
     /// occupancy of the channel from the `Consensus` to the `primary::StateHandler`
     pub tx_committed_certificates: IntGauge,
     /// occupancy of the channel from the `primary::Synchronizer` to the `Consensus`
     pub tx_new_certificates: IntGauge,
     /// occupancy of the channel signaling own committed headers
-    pub tx_commited_own_headers: IntGauge,
+    pub tx_committed_own_headers: IntGauge,
+    /// occupancy of the channel from the `primary::PrimaryReceiverHandler` to the `primary::StateHandler`
+    pub tx_randomness_partial_signatures: IntGauge,
+    /// An internal synchronizer channel. Occupancy of the channel sending certificates to the internal
+    /// task that accepts certificates.
+    pub tx_certificate_acceptor: IntGauge,
+    /// Occupancy of the channel synchronizing batches for provided headers & certificates.
+    pub tx_batch_tasks: IntGauge,
 
     // totals
     /// total received on channel from the `primary::WorkerReceiverHandler` to the `primary::PayloadReceiver`
     pub tx_others_digests_total: IntCounter,
     /// total received on channel from the `primary::WorkerReceiverHandler` to the `primary::Proposer`
     pub tx_our_digests_total: IntCounter,
+    /// total received on channel from the `primary::StateHandler` to the `primary::Proposer`
+    pub tx_system_messages_total: IntCounter,
     /// total received on channel from the `primary::Synchronizer` to the `primary::Proposer`
     pub tx_parents_total: IntCounter,
     /// total received on channel from the `primary::Proposer` to the `primary::Certifier`
     pub tx_headers_total: IntCounter,
     /// total received on channel from the `primary::Synchronizer` to the `primary::CertificaterWaiter`
     pub tx_certificate_fetcher_total: IntCounter,
-    /// total received on channel from the `primary::BlockSynchronizerHandler` to the `primary::BlockSynchronizer`
-    pub tx_block_synchronizer_commands_total: IntCounter,
     /// total received on channel from the `primary::WorkerReceiverHandler` to the `primary::StateHandler`
     pub tx_state_handler_total: IntCounter,
     /// total received on channel from the `Consensus` to the `primary::StateHandler`
@@ -99,7 +97,13 @@ pub struct PrimaryChannelMetrics {
     /// total received on channel from the `primary::Synchronizer` to the `Consensus`
     pub tx_new_certificates_total: IntCounter,
     /// total received on the channel signaling own committed headers
-    pub tx_commited_own_headers_total: IntCounter,
+    pub tx_committed_own_headers_total: IntCounter,
+    /// total received on the channel from the `primary::PrimaryReceiverHandler` to the `primary::StateHandler`
+    pub tx_randomness_partial_signatures_total: IntCounter,
+    /// Total received by the channel sending certificates to the internal task that accepts certificates.
+    pub tx_certificate_acceptor_total: IntCounter,
+    /// Total received the channel to synchronize missing batches
+    pub tx_batch_tasks_total: IntCounter,
 }
 
 impl PrimaryChannelMetrics {
@@ -137,6 +141,11 @@ impl PrimaryChannelMetrics {
                 "occupancy of the channel from the `primary::WorkerReceiverHandler` to the `primary::Proposer`",
                 registry
             ).unwrap(),
+            tx_system_messages: register_int_gauge_with_registry!(
+                "tx_system_messages",
+                "occupancy of the channel from the `primary::StateHandler` to the `primary::Proposer`",
+                registry
+            ).unwrap(),
             tx_parents: register_int_gauge_with_registry!(
                 "tx_parents",
                 "occupancy of the channel from the `primary::Synchronizer` to the `primary::Proposer`",
@@ -152,11 +161,6 @@ impl PrimaryChannelMetrics {
                 "occupancy of the channel from the `primary::Synchronizer` to the `primary::CertificaterWaiter`",
                 registry
             ).unwrap(),
-            tx_block_synchronizer_commands: register_int_gauge_with_registry!(
-                "tx_block_synchronizer_commands",
-                "occupancy of the channel from the `primary::BlockSynchronizerHandler` to the `primary::BlockSynchronizer`",
-                registry
-            ).unwrap(),
             tx_committed_certificates: register_int_gauge_with_registry!(
                 Self::NAME_COMMITTED_CERTS,
                 Self::DESC_COMMITTED_CERTS,
@@ -167,9 +171,24 @@ impl PrimaryChannelMetrics {
                 Self::DESC_NEW_CERTS,
                 registry
             ).unwrap(),
-            tx_commited_own_headers: register_int_gauge_with_registry!(
-                "tx_commited_own_headers",
+            tx_committed_own_headers: register_int_gauge_with_registry!(
+                "tx_committed_own_headers",
                 "occupancy of the channel signaling own committed headers.",
+                registry
+            ).unwrap(),
+            tx_randomness_partial_signatures: register_int_gauge_with_registry!(
+                "tx_randomness_partial_signatures",
+                "occupancy of the channel from the `primary::PrimaryReceiverHandler` to the `primary::StateHandler`",
+                registry
+            ).unwrap(),
+            tx_certificate_acceptor: register_int_gauge_with_registry!(
+                "tx_certificate_acceptor",
+                "occupancy of the internal synchronizer channel that is accepting new certificates.",
+                registry
+            ).unwrap(),
+            tx_batch_tasks: register_int_gauge_with_registry!(
+                "tx_batch_tasks",
+                "Occupancy of the channel synchronizing batches for provided headers & certificates",
                 registry
             ).unwrap(),
 
@@ -182,6 +201,11 @@ impl PrimaryChannelMetrics {
             tx_our_digests_total: register_int_counter_with_registry!(
                 "tx_our_digests_total",
                 "total received on channel from the `primary::WorkerReceiverHandler` to the `primary::Proposer`",
+                registry
+            ).unwrap(),
+            tx_system_messages_total: register_int_counter_with_registry!(
+                "tx_system_messages_total",
+                "total received on channel from the `primary::StateHandler` to the `primary::Proposer`",
                 registry
             ).unwrap(),
             tx_parents_total: register_int_counter_with_registry!(
@@ -199,11 +223,6 @@ impl PrimaryChannelMetrics {
                 "total received on channel from the `primary::Synchronizer` to the `primary::CertificaterWaiter`",
                 registry
             ).unwrap(),
-            tx_block_synchronizer_commands_total: register_int_counter_with_registry!(
-                "tx_block_synchronizer_commands_total",
-                "total received on channel from the `primary::BlockSynchronizerHandler` to the `primary::BlockSynchronizer`",
-                registry
-            ).unwrap(),
             tx_state_handler_total: register_int_counter_with_registry!(
                 "tx_state_handler_total",
                 "total received on channel from the `primary::WorkerReceiverHandler` to the `primary::StateHandler`",
@@ -219,9 +238,24 @@ impl PrimaryChannelMetrics {
                 Self::DESC_NEW_CERTS_TOTAL,
                 registry
             ).unwrap(),
-            tx_commited_own_headers_total: register_int_counter_with_registry!(
-                "tx_commited_own_headers_total",
+            tx_committed_own_headers_total: register_int_counter_with_registry!(
+                "tx_committed_own_headers_total",
                 "total received on channel signaling own committed headers.",
+                registry
+            ).unwrap(),
+            tx_randomness_partial_signatures_total: register_int_counter_with_registry!(
+                "tx_randomness_partial_signatures_total",
+                "total received on the channel from the `primary::PrimaryReceiverHandler` to the `primary::StateHandler`",
+                registry
+            ).unwrap(),
+            tx_certificate_acceptor_total: register_int_counter_with_registry!(
+                "tx_certificate_acceptor_total",
+                "total received on the internal synchronizer channel that is accepting new certificates.",
+                registry
+            ).unwrap(),
+            tx_batch_tasks_total: register_int_counter_with_registry!(
+                "tx_batch_tasks_total",
+                "total received on the channel synchronizing batches for provided headers & certificates",
                 registry
             ).unwrap(),
         }
@@ -294,7 +328,11 @@ pub struct PrimaryMetrics {
     /// 0 if there is no inflight certificates fetching, 1 otherwise.
     pub certificate_fetcher_inflight_fetch: IntGauge,
     /// Number of fetched certificates successfully processed by core.
-    pub certificate_fetcher_num_certificates_processed: IntGauge,
+    pub certificate_fetcher_num_certificates_processed: IntCounter,
+    /// Total time spent in certificate verifications, in microseconds.
+    pub certificate_fetcher_total_verification_us: IntCounter,
+    /// Total time spent to accept certificates via Synchronizer, in microseconds.
+    pub certificate_fetcher_total_accept_us: IntCounter,
     /// Number of votes that were requested but not sent due to previously having voted differently
     pub votes_dropped_equivocation_protection: IntCounter,
     /// Number of pending batches in proposer
@@ -314,6 +352,18 @@ pub struct PrimaryMetrics {
     pub proposer_resend_batches: IntCounter,
     /// Time it takes for a header to be materialised to a certificate
     pub header_to_certificate_latency: Histogram,
+    /// Millisecs taken to wait for max parent time, when proposing headers.
+    pub header_max_parent_wait_ms: IntCounter,
+    /// Counts when the GC loop in synchronizer times out waiting for consensus commit.
+    pub synchronizer_gc_timeout: IntCounter,
+    // Total number of fetched certificates verified directly.
+    pub fetched_certificates_verified_directly: IntCounter,
+    // Total number of fetched certificates verified indirectly.
+    pub fetched_certificates_verified_indirectly: IntCounter,
+    /// The number of shares held by this node after the random beacon DKG protocol completed.
+    pub state_handler_random_beacon_dkg_num_shares: IntGauge,
+    /// The randomness round that currently in progress.
+    pub state_handler_current_randomness_round: IntGauge,
 }
 
 impl PrimaryMetrics {
@@ -424,9 +474,21 @@ impl PrimaryMetrics {
                 registry
             )
             .unwrap(),
-            certificate_fetcher_num_certificates_processed: register_int_gauge_with_registry!(
+            certificate_fetcher_num_certificates_processed: register_int_counter_with_registry!(
                 "certificate_fetcher_num_certificates_processed",
                 "Number of fetched certificates successfully processed by core.",
+                registry
+            )
+            .unwrap(),
+            certificate_fetcher_total_verification_us: register_int_counter_with_registry!(
+                "certificate_fetcher_total_verification_us",
+                "Total time spent in certificate verifications, in microseconds.",
+                registry
+            )
+            .unwrap(),
+            certificate_fetcher_total_accept_us: register_int_counter_with_registry!(
+                "certificate_fetcher_total_accept_us",
+                "Total time spent to accept certificates via Synchronizer, in microseconds.",
                 registry
             )
             .unwrap(),
@@ -476,65 +538,42 @@ impl PrimaryMetrics {
                 "Time it takes for a header to be materialised to a certificate",
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry
-            ).unwrap()
+            ).unwrap(),
+            header_max_parent_wait_ms: register_int_counter_with_registry!(
+                "header_max_parent_wait_ms",
+                "Millisecs taken to wait for max parent time, when proposing headers.",
+                registry
+            ).unwrap(),
+            synchronizer_gc_timeout: register_int_counter_with_registry!(
+                "synchronizer_gc_timeout",
+                "Counts when the GC loop in synchronizer times out waiting for consensus commit.",
+                registry
+            ).unwrap(),
+            fetched_certificates_verified_directly: register_int_counter_with_registry!(
+                "fetched_certificates_verified_directly",
+                "Total number of fetched certificates verified directly.",
+                registry
+            ).unwrap(),
+            fetched_certificates_verified_indirectly: register_int_counter_with_registry!(
+                "fetched_certificates_verified_indirectly",
+                "Total number of fetched certificates verified indirectly.",
+                registry
+            ).unwrap(),
+            state_handler_random_beacon_dkg_num_shares: register_int_gauge_with_registry!(
+                "state_handler_random_beacon_dkg_num_shares",
+                "The number of shares held by this node after the random beacon DKG protocol completed.",
+                registry
+            ).unwrap(),
+            state_handler_current_randomness_round: register_int_gauge_with_registry!(
+                "state_handler_current_randomness_round",
+                "The randomness round that currently in progress.",
+                registry
+            ).unwrap(),
         }
     }
 }
 
 impl Default for PrimaryMetrics {
-    fn default() -> Self {
-        Self::new(default_registry())
-    }
-}
-
-#[derive(Clone)]
-pub struct PrimaryEndpointMetrics {
-    /// Counter of requests, route is a label (ie separate timeseries per route)
-    requests_by_route: IntCounterVec,
-    /// Request latency, route is a label
-    req_latency_by_route: HistogramVec,
-}
-
-impl PrimaryEndpointMetrics {
-    pub fn new(registry: &Registry) -> Self {
-        Self {
-            requests_by_route: register_int_counter_vec_with_registry!(
-                "primary_requests_by_route",
-                "Number of requests by route",
-                &["route", "status", "grpc_status_code"],
-                registry
-            )
-            .unwrap(),
-            req_latency_by_route: register_histogram_vec_with_registry!(
-                "primary_req_latency_by_route",
-                "Latency of a request by route",
-                &["route", "status", "grpc_status_code"],
-                registry
-            )
-            .unwrap(),
-        }
-    }
-}
-
-impl MetricsCallbackProvider for PrimaryEndpointMetrics {
-    fn on_request(&self, _path: String) {
-        // For now we just do nothing
-    }
-
-    fn on_response(&self, path: String, latency: Duration, status: u16, grpc_status_code: Code) {
-        let code: i32 = grpc_status_code.into();
-        let labels = [path.as_str(), &status.to_string(), &code.to_string()];
-
-        self.requests_by_route.with_label_values(&labels).inc();
-
-        let req_latency_secs = latency.as_secs_f64();
-        self.req_latency_by_route
-            .with_label_values(&labels)
-            .observe(req_latency_secs);
-    }
-}
-
-impl Default for PrimaryEndpointMetrics {
     fn default() -> Self {
         Self::new(default_registry())
     }

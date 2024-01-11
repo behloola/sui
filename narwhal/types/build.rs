@@ -63,28 +63,19 @@ fn build_anemo_services(out_dir: &Path) {
         )
         .method(
             anemo_build::manual::Method::builder()
+                .name("send_randomness_partial_signatures")
+                .route_name("SendRandomnessPartialSignatures")
+                .request_type("crate::SendRandomnessPartialSignaturesRequest")
+                .response_type("()")
+                .codec_path(codec_path)
+                .build(),
+        )
+        .method(
+            anemo_build::manual::Method::builder()
                 .name("request_vote")
                 .route_name("RequestVote")
                 .request_type("crate::RequestVoteRequest")
                 .response_type("crate::RequestVoteResponse")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("get_payload_availability")
-                .route_name("GetPayloadAvailability")
-                .request_type("crate::PayloadAvailabilityRequest")
-                .response_type("crate::PayloadAvailabilityResponse")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("get_certificates")
-                .route_name("GetCertificates")
-                .request_type("crate::GetCertificatesRequest")
-                .response_type("crate::GetCertificatesResponse")
                 .codec_path(codec_path)
                 .build(),
         )
@@ -114,10 +105,10 @@ fn build_anemo_services(out_dir: &Path) {
         )
         .method(
             anemo_build::manual::Method::builder()
-                .name("delete_batches")
-                .route_name("DeleteBatches")
-                .request_type("crate::WorkerDeleteBatchesMessage")
-                .response_type("()")
+                .name("fetch_batches")
+                .route_name("FetchBatches")
+                .request_type("crate::FetchBatchesRequest")
+                .response_type("crate::FetchBatchesResponse")
                 .codec_path(codec_path)
                 .build(),
         )
@@ -129,9 +120,9 @@ fn build_anemo_services(out_dir: &Path) {
         .attributes(automock_attribute.clone())
         .method(
             anemo_build::manual::Method::builder()
-                .name("report_our_batch")
-                .route_name("ReportOurBatch")
-                .request_type("crate::WorkerOurBatchMessage")
+                .name("report_own_batch")
+                .route_name("ReportOwnBatch")
+                .request_type("crate::WorkerOwnBatchMessage")
                 .response_type("()")
                 .codec_path(codec_path)
                 .build(),
@@ -142,15 +133,6 @@ fn build_anemo_services(out_dir: &Path) {
                 .route_name("ReportOthersBatch")
                 .request_type("crate::WorkerOthersBatchMessage")
                 .response_type("()")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("worker_info")
-                .route_name("WorkerInfo")
-                .request_type("()")
-                .response_type("crate::WorkerInfoResponse")
                 .codec_path(codec_path)
                 .build(),
         )
@@ -166,15 +148,6 @@ fn build_anemo_services(out_dir: &Path) {
                 .route_name("ReportBatch")
                 .request_type("crate::WorkerBatchMessage")
                 .response_type("()")
-                .codec_path(codec_path)
-                .build(),
-        )
-        .method(
-            anemo_build::manual::Method::builder()
-                .name("request_batch")
-                .route_name("RequestBatch")
-                .request_type("crate::RequestBatchRequest")
-                .response_type("crate::RequestBatchResponse")
                 .codec_path(codec_path)
                 .build(),
         )

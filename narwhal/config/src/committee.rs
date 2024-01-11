@@ -4,7 +4,8 @@
 
 use crate::{CommitteeUpdateError, ConfigError, Epoch, Stake};
 use crypto::{NetworkPublicKey, PublicKey, PublicKeyBytes};
-use fastcrypto::traits::EncodeDecodeBase64;
+use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto::traits::{EncodeDecodeBase64, ToFromBytes};
 use mysten_network::Multiaddr;
 use mysten_util_mem::MallocSizeOf;
 use rand::rngs::StdRng;
@@ -30,6 +31,8 @@ pub struct Authority {
     primary_address: Multiaddr,
     /// Network key of the primary.
     network_key: NetworkPublicKey,
+    /// The validator's hostname
+    hostname: String,
     /// There are secondary indexes that should be initialised before we are ready to use the
     /// authority - this bool protect us for premature use.
     #[serde(skip)]
@@ -46,6 +49,7 @@ impl Authority {
         stake: Stake,
         primary_address: Multiaddr,
         network_key: NetworkPublicKey,
+        hostname: String,
     ) -> Self {
         let protocol_key_bytes = PublicKeyBytes::from(&protocol_key);
 
@@ -56,6 +60,7 @@ impl Authority {
             stake,
             primary_address,
             network_key,
+            hostname,
             initialised: false,
         }
     }
@@ -93,6 +98,11 @@ impl Authority {
     pub fn network_key(&self) -> NetworkPublicKey {
         assert!(self.initialised);
         self.network_key.clone()
+    }
+
+    pub fn hostname(&self) -> &str {
+        assert!(self.initialised);
+        self.hostname.as_str()
     }
 }
 
@@ -138,6 +148,8 @@ impl Display for AuthorityIdentifier {
 }
 
 impl Committee {
+    pub const DEFAULT_FILENAME: &'static str = "committee.json";
+
     /// Any committee should be created via the CommitteeBuilder - this is intentionally be marked as
     /// private method.
     fn new(authorities: BTreeMap<PublicKey, Authority>, epoch: Epoch) -> Self {
@@ -177,14 +189,14 @@ impl Committee {
     fn calculate_quorum_threshold(&self) -> NonZeroU64 {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        let total_votes: Stake = self.total_stake();
         NonZeroU64::new(2 * total_votes / 3 + 1).unwrap()
     }
 
     fn calculate_validity_threshold(&self) -> NonZeroU64 {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (N + 2) / 3 = f + 1 + k/3 = f + 1
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        let total_votes: Stake = self.total_stake();
         NonZeroU64::new((total_votes + 2) / 3).unwrap()
     }
 
@@ -233,6 +245,34 @@ impl Committee {
         self.authorities.keys().cloned().collect::<Vec<PublicKey>>()
     }
 
+    /// Returns info from the committee needed for randomness DKG.
+    pub fn randomness_dkg_info(
+        &self,
+    ) -> Vec<(
+        AuthorityIdentifier,
+        fastcrypto_tbls::ecies::PublicKey<fastcrypto::groups::bls12381::G2Element>,
+        Stake,
+    )> {
+        self.authorities_by_id
+            .iter()
+            .map(|(id, authority)| {
+                let pk = fastcrypto::groups::bls12381::G2Element::from_byte_array(
+                    authority
+                        .protocol_key()
+                        .as_bytes()
+                        .try_into()
+                        .expect("key length should match"),
+                )
+                .expect("should work to convert BLS key to G2Element");
+                (
+                    *id,
+                    fastcrypto_tbls::ecies::PublicKey::from(pk),
+                    authority.stake(),
+                )
+            })
+            .collect()
+    }
+
     pub fn authorities(&self) -> impl Iterator<Item = &Authority> {
         self.authorities.values()
     }
@@ -272,6 +312,20 @@ impl Committee {
         self.validity_threshold
     }
 
+    /// Returns true if the provided stake has reached quorum (2f+1)
+    pub fn reached_quorum(&self, stake: Stake) -> bool {
+        stake >= self.quorum_threshold()
+    }
+
+    /// Returns true if the provided stake has reached availability (f+1)
+    pub fn reached_validity(&self, stake: Stake) -> bool {
+        stake >= self.validity_threshold()
+    }
+
+    pub fn total_stake(&self) -> Stake {
+        self.authorities.values().map(|x| x.stake).sum()
+    }
+
     /// Returns a leader node as a weighted choice seeded by the provided integer
     pub fn leader(&self, seed: u64) -> Authority {
         let mut seed_bytes = [0u8; 32];
@@ -279,8 +333,8 @@ impl Committee {
         let mut rng = StdRng::from_seed(seed_bytes);
         let choices = self
             .authorities
-            .iter()
-            .map(|(_name, authority)| (authority.clone(), authority.stake as f32))
+            .values()
+            .map(|authority| (authority.clone(), authority.stake as f32))
             .collect::<Vec<_>>();
         choices
             .choose_weighted(&mut rng, |item| item.1)
@@ -367,6 +421,7 @@ impl Committee {
     /// Update the networking information of some of the primaries. The arguments are a full vector of
     /// authorities which Public key and Stake must match the one stored in the current Committee. Any discrepancy
     /// will generate no update and return a vector of errors.
+    #[allow(clippy::manual_try_fold)]
     pub fn update_primary_network_info(
         &mut self,
         mut new_info: BTreeMap<PublicKey, (Stake, Multiaddr)>,
@@ -458,8 +513,15 @@ impl CommitteeBuilder {
         stake: Stake,
         primary_address: Multiaddr,
         network_key: NetworkPublicKey,
+        hostname: String,
     ) -> Self {
-        let authority = Authority::new(protocol_key.clone(), stake, primary_address, network_key);
+        let authority = Authority::new(
+            protocol_key.clone(),
+            stake,
+            primary_address,
+            network_key,
+            hostname,
+        );
         self.authorities.insert(protocol_key, authority);
         self
     }
@@ -485,8 +547,7 @@ mod tests {
         let num_of_authorities = 10;
 
         let authorities = (0..num_of_authorities)
-            .into_iter()
-            .map(|_i| {
+            .map(|i| {
                 let keypair = KeyPair::generate(&mut rng);
                 let network_keypair = NetworkKeyPair::generate(&mut rng);
 
@@ -495,6 +556,7 @@ mod tests {
                     1,
                     Multiaddr::empty(),
                     network_keypair.public().clone(),
+                    i.to_string(),
                 );
 
                 (keypair.public().clone(), a)

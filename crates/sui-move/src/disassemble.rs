@@ -13,6 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Parser)]
+#[group(id = "sui-move-disassemmble")]
 pub struct Disassemble {
     /// Path to a .mv file to disassemble
     #[clap(name = "module_path")]
@@ -59,7 +60,7 @@ impl Disassemble {
         file.read_to_end(&mut bytes)?;
         // this deserialized a module to the max version of the bytecode but it's OK here because
         // it's not run as part of the deterministic replicated state machine.
-        let module = CompiledModule::deserialize(&bytes)?;
+        let module = CompiledModule::deserialize_with_defaults(&bytes)?;
 
         if self.debug {
             println!("{module:#?}");

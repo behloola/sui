@@ -1,18 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::anyhow;
 use clap::Parser;
 use nexlint::{prelude::*, NexLintContext};
 use nexlint_lints::{
     content::*,
-    handle_lint_results,
     package::*,
     project::{
-        BannedDepConfig, BannedDepType, BannedDeps, BannedDepsConfig,
-        DirectDuplicateGitDependencies,
+        BannedDepConfig, BannedDepType, BannedDeps, BannedDepsConfig, DirectDepDups,
+        DirectDepDupsConfig, DirectDuplicateGitDependencies,
     },
 };
-
+static EXTERNAL_CRATE_DIR: &str = "external-crates/";
+static CREATE_DAPP_TEMPLATE_DIR: &str = "sdk/create-dapp/templates";
 static LICENSE_HEADER: &str = "Copyright (c) Mysten Labs, Inc.\n\
                                SPDX-License-Identifier: Apache-2.0\n\
                                ";
@@ -46,12 +47,40 @@ pub fn run(args: Args) -> crate::Result<()> {
                     type_: BannedDepType::Always,
                 },
             ),
+            (
+                "actix-web".to_owned(),
+                BannedDepConfig {
+                    message: "use axum for a webframework instead".to_owned(),
+                    type_: BannedDepType::Always,
+                },
+            ),
+            (
+                "warp".to_owned(),
+                BannedDepConfig {
+                    message: "use axum for a webframework instead".to_owned(),
+                    type_: BannedDepType::Always,
+                },
+            ),
         ]
         .into_iter()
         .collect(),
     );
+
+    let direct_dep_dups_config = DirectDepDupsConfig {
+        allow: vec![
+            // TODO spend the time to de-dup these direct dependencies
+            "serde_yaml".to_owned(),
+            "syn".to_owned(),
+            // Our opentelemetry integration requires that we use the same version of these packages
+            // as the opentelemetry crates.
+            "prost".to_owned(),
+            "tonic".to_owned(),
+        ],
+    };
+
     let project_linters: &[&dyn ProjectLinter] = &[
         &BannedDeps::new(&banned_deps_config),
+        &DirectDepDups::new(&direct_dep_dups_config),
         &DirectDuplicateGitDependencies,
     ];
 
@@ -91,5 +120,36 @@ pub fn run(args: Args) -> crate::Result<()> {
 
     let results = engine.run()?;
 
-    handle_lint_results(results)
+    handle_lint_results_exclude_external_crate_checks(results)
+}
+
+/// Define custom handler so we can skip certain lints on certain files. This is a temporary till we upstream this logic
+pub fn handle_lint_results_exclude_external_crate_checks(
+    results: LintResults,
+) -> crate::Result<()> {
+    // TODO: handle skipped results
+    let mut errs = false;
+    for (source, message) in &results.messages {
+        if let LintKind::Content(path) = source.kind() {
+            if (path.starts_with(EXTERNAL_CRATE_DIR) || path.starts_with(CREATE_DAPP_TEMPLATE_DIR))
+                && source.name() == "license-header"
+            {
+                continue;
+            }
+        }
+        println!(
+            "[{}] [{}] [{}]: {}\n",
+            message.level(),
+            source.name(),
+            source.kind(),
+            message.message()
+        );
+        errs = true;
+    }
+
+    if errs {
+        Err(anyhow!("there were lint errors"))
+    } else {
+        Ok(())
+    }
 }

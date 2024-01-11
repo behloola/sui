@@ -4,7 +4,7 @@
 use super::*;
 use crate::authority::{authority_tests::init_state_with_objects, AuthorityState};
 use crate::checkpoints::CheckpointServiceNoop;
-use crate::consensus_handler::VerifiedSequencedConsensusTransaction;
+use crate::consensus_handler::SequencedConsensusTransaction;
 use move_core_types::{account_address::AccountAddress, ident_str};
 use narwhal_types::Transactions;
 use narwhal_types::TransactionsServer;
@@ -12,12 +12,13 @@ use narwhal_types::{Empty, TransactionProto};
 use sui_network::tonic;
 use sui_types::crypto::deterministic_random_account_key;
 use sui_types::multiaddr::Multiaddr;
+use sui_types::transaction::TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS;
 use sui_types::utils::to_sender_signed_transaction;
-use sui_types::SUI_FRAMEWORK_OBJECT_ID;
+use sui_types::SUI_FRAMEWORK_PACKAGE_ID;
 use sui_types::{
     base_types::ObjectID,
-    messages::{CallArg, CertifiedTransaction, ObjectArg, TransactionData},
     object::Object,
+    transaction::{CallArg, CertifiedTransaction, ObjectArg, TransactionData},
 };
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -41,6 +42,7 @@ pub fn test_gas_objects() -> Vec<Object> {
 pub async fn test_certificates(authority: &AuthorityState) -> Vec<CertifiedTransaction> {
     let epoch_store = authority.load_epoch_store_one_call_per_task();
     let (sender, keypair) = deterministic_random_account_key();
+    let rgp = epoch_store.reference_gas_price();
 
     let mut certificates = Vec::new();
     let shared_object = Object::shared_for_testing();
@@ -50,13 +52,19 @@ pub async fn test_certificates(authority: &AuthorityState) -> Vec<CertifiedTrans
         mutable: true,
     };
     for gas_object in test_gas_objects() {
+        // Object digest may be different in genesis than originally generated.
+        let gas_object = authority
+            .get_object(&gas_object.id())
+            .await
+            .unwrap()
+            .unwrap();
         // Make a sample transaction.
         let module = "object_basics";
         let function = "create";
 
-        let data = TransactionData::new_move_call_with_dummy_gas_price(
+        let data = TransactionData::new_move_call(
             sender,
-            SUI_FRAMEWORK_OBJECT_ID,
+            SUI_FRAMEWORK_PACKAGE_ID,
             ident_str!(module).to_owned(),
             ident_str!(function).to_owned(),
             /* type_args */ vec![],
@@ -67,11 +75,14 @@ pub async fn test_certificates(authority: &AuthorityState) -> Vec<CertifiedTrans
                 CallArg::Pure(16u64.to_le_bytes().to_vec()),
                 CallArg::Pure(bcs::to_bytes(&AccountAddress::from(sender)).unwrap()),
             ],
-            /* max_gas */ 10_000,
+            rgp * TEST_ONLY_GAS_UNIT_FOR_OBJECT_BASICS,
+            rgp,
         )
         .unwrap();
 
-        let transaction = to_sender_signed_transaction(data, &keypair);
+        let transaction = epoch_store
+            .verify_transaction(to_sender_signed_transaction(data, &keypair))
+            .unwrap();
 
         // Submit the transaction and assemble a certificate.
         let response = authority
@@ -98,6 +109,7 @@ async fn submit_transaction_to_consensus_adapter() {
     objects.push(Object::shared_for_testing());
     let state = init_state_with_objects(objects).await;
     let certificate = test_certificates(&state).await.pop().unwrap();
+    let epoch_store = state.epoch_store_for_testing();
 
     let metrics = ConsensusAdapterMetrics::new_test();
 
@@ -112,10 +124,11 @@ async fn submit_transaction_to_consensus_adapter() {
             epoch_store: &Arc<AuthorityPerEpochStore>,
         ) -> SuiResult {
             epoch_store
-                .process_consensus_transaction(
-                    VerifiedSequencedConsensusTransaction::new_test(transaction.clone()),
+                .process_consensus_transactions_for_tests(
+                    vec![SequencedConsensusTransaction::new_test(transaction.clone())],
                     &Arc::new(CheckpointServiceNoop {}),
                     self.0.db(),
+                    &self.0.metrics.skipped_consensus_txns,
                 )
                 .await?;
             Ok(())
@@ -123,18 +136,20 @@ async fn submit_transaction_to_consensus_adapter() {
     }
     // Make a new consensus adapter instance.
     let adapter = Arc::new(ConsensusAdapter::new(
-        Box::new(SubmitDirectly(state.clone())),
+        Arc::new(SubmitDirectly(state.clone())),
         state.name,
-        Box::new(Arc::new(ConnectionMonitorStatusForTests {})),
+        Arc::new(ConnectionMonitorStatusForTests {}),
         100_000,
         100_000,
+        None,
+        None,
         metrics,
+        epoch_store.protocol_config().clone(),
     ));
 
     // Submit the transaction and ensure the adapter reports success to the caller. Note
     // that consensus may drop some transactions (so we may need to resubmit them).
     let transaction = ConsensusTransaction::new_certificate_message(&state.name, certificate);
-    let epoch_store = state.epoch_store_for_testing();
     let waiter = adapter
         .submit(
             transaction.clone(),

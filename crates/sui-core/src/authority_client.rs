@@ -10,12 +10,18 @@ use std::time::Duration;
 use sui_network::{api::ValidatorClient, tonic};
 use sui_types::base_types::AuthorityName;
 use sui_types::committee::CommitteeWithNetworkMetadata;
-use sui_types::messages_checkpoint::{CheckpointRequest, CheckpointResponse};
+use sui_types::messages_checkpoint::{
+    CheckpointRequest, CheckpointRequestV2, CheckpointResponse, CheckpointResponseV2,
+};
 use sui_types::multiaddr::Multiaddr;
 use sui_types::sui_system_state::SuiSystemState;
-use sui_types::{error::SuiError, messages::*};
+use sui_types::{error::SuiError, transaction::*};
 
 use sui_network::tonic::transport::Channel;
+use sui_types::messages_grpc::{
+    HandleCertificateResponseV2, HandleTransactionResponse, ObjectInfoRequest, ObjectInfoResponse,
+    SystemStateRequest, TransactionInfoRequest, TransactionInfoResponse,
+};
 
 #[async_trait]
 pub trait AuthorityAPI {
@@ -26,10 +32,10 @@ pub trait AuthorityAPI {
     ) -> Result<HandleTransactionResponse, SuiError>;
 
     /// Execute a certificate.
-    async fn handle_certificate(
+    async fn handle_certificate_v2(
         &self,
         certificate: CertifiedTransaction,
-    ) -> Result<HandleCertificateResponse, SuiError>;
+    ) -> Result<HandleCertificateResponseV2, SuiError>;
 
     /// Handle Object information requests for this account.
     async fn handle_object_info_request(
@@ -47,6 +53,11 @@ pub trait AuthorityAPI {
         &self,
         request: CheckpointRequest,
     ) -> Result<CheckpointResponse, SuiError>;
+
+    async fn handle_checkpoint_v2(
+        &self,
+        request: CheckpointRequestV2,
+    ) -> Result<CheckpointResponseV2, SuiError>;
 
     // This API is exclusively used by the benchmark code.
     // Hence it's OK to return a fixed system state type.
@@ -101,15 +112,17 @@ impl AuthorityAPI for NetworkAuthorityClient {
     }
 
     /// Execute a certificate.
-    async fn handle_certificate(
+    async fn handle_certificate_v2(
         &self,
         certificate: CertifiedTransaction,
-    ) -> Result<HandleCertificateResponse, SuiError> {
-        self.client()
-            .handle_certificate(certificate)
+    ) -> Result<HandleCertificateResponseV2, SuiError> {
+        let response = self
+            .client()
+            .handle_certificate_v2(certificate.clone())
             .await
-            .map(tonic::Response::into_inner)
-            .map_err(Into::into)
+            .map(tonic::Response::into_inner);
+
+        response.map_err(Into::into)
     }
 
     async fn handle_object_info_request(
@@ -142,6 +155,18 @@ impl AuthorityAPI for NetworkAuthorityClient {
     ) -> Result<CheckpointResponse, SuiError> {
         self.client()
             .checkpoint(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(Into::into)
+    }
+
+    /// Handle Object information requests for this account.
+    async fn handle_checkpoint_v2(
+        &self,
+        request: CheckpointRequestV2,
+    ) -> Result<CheckpointResponseV2, SuiError> {
+        self.client()
+            .checkpoint_v2(request)
             .await
             .map(tonic::Response::into_inner)
             .map_err(Into::into)

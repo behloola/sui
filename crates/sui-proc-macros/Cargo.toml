@@ -10,9 +10,11 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-quote = "1"
-syn = "1.0.104"
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+quote.workspace = true
+syn = { version = "2", features = ["full", "fold", "extra-traits"] }
+proc-macro2.workspace = true
+sui-enum-compat-util.workspace = true
+workspace-hack.workspace = true
 
 [target.'cfg(msim)'.dependencies]
-msim-macros = { git = "https://github.com/MystenLabs/mysten-sim.git", rev = "888a9dc4331b0ed944bd6e37bac982bbcf0625d5", package = "msim-macros" }
+msim-macros.workspace = true

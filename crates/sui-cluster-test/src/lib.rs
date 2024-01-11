@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::faucet::{FaucetClient, FaucetClientFactory};
 use async_trait::async_trait;
-use clap::*;
 use cluster::{Cluster, ClusterFactory};
 use config::ClusterTestOpt;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -10,26 +9,26 @@ use helper::ObjectChecker;
 use jsonrpsee::core::params::ArrayParams;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 use std::sync::Arc;
-use sui::client_commands::WalletContext;
 use sui_faucet::CoinInfo;
 use sui_json_rpc_types::{
-    SuiExecutionStatus, SuiTransactionEffectsAPI, SuiTransactionResponse,
-    SuiTransactionResponseOptions, TransactionBytes,
+    SuiExecutionStatus, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
+    SuiTransactionBlockResponseOptions, TransactionBlockBytes,
 };
+use sui_sdk::wallet_context::WalletContext;
+use sui_test_transaction_builder::batch_make_transfer_transactions;
 use sui_types::base_types::TransactionDigest;
-use sui_types::messages::ExecuteTransactionRequestType;
 use sui_types::object::Owner;
-use test_utils::messages::make_transactions_with_wallet_context;
+use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
+use sui_types::sui_system_state::sui_system_state_summary::SuiSystemStateSummary;
 
-use shared_crypto::intent::Intent;
 use sui_sdk::SuiClient;
 use sui_types::gas_coin::GasCoin;
 use sui_types::{
     base_types::SuiAddress,
-    messages::{Transaction, TransactionData, VerifiedTransaction},
+    transaction::{Transaction, TransactionData},
 };
 use test_case::{
-    coin_merge_split_test::CoinMergeSplitTest,
+    coin_index_test::CoinIndexTest, coin_merge_split_test::CoinMergeSplitTest,
     fullnode_build_publish_transaction_test::FullNodeBuildPublishTransactionTest,
     fullnode_execute_transaction_test::FullNodeExecuteTransactionTest,
     native_transfer_test::NativeTransferTest, shared_object_test::SharedCounterTest,
@@ -71,7 +70,7 @@ impl TestContext {
             .check_owner_and_into_gas_coin(faucet_response.transferred_gas_objects, addr)
             .await;
 
-        let minimum_coins = minimum_coins.unwrap_or(5);
+        let minimum_coins = minimum_coins.unwrap_or(1);
 
         if gas_coins.len() < minimum_coins {
             panic!(
@@ -91,6 +90,10 @@ impl TestContext {
         self.client.get_fullnode_client()
     }
 
+    fn clone_fullnode_client(&self) -> SuiClient {
+        self.client.get_fullnode_client().clone()
+    }
+
     fn get_fullnode_rpc_url(&self) -> &str {
         self.cluster.fullnode_url()
     }
@@ -99,8 +102,22 @@ impl TestContext {
         self.client.get_wallet()
     }
 
-    fn get_wallet_mut(&mut self) -> &mut WalletContext {
-        self.client.get_wallet_mut()
+    async fn get_latest_sui_system_state(&self) -> SuiSystemStateSummary {
+        self.client
+            .get_fullnode_client()
+            .governance_api()
+            .get_latest_sui_system_state()
+            .await
+            .unwrap()
+    }
+
+    async fn get_reference_gas_price(&self) -> u64 {
+        self.client
+            .get_fullnode_client()
+            .governance_api()
+            .get_reference_gas_price()
+            .await
+            .unwrap()
     }
 
     fn get_wallet_address(&self) -> SuiAddress {
@@ -109,8 +126,8 @@ impl TestContext {
 
     /// See `make_transactions_with_wallet_context` for potential caveats
     /// of this helper function.
-    pub async fn make_transactions(&mut self, max_txn_num: usize) -> Vec<VerifiedTransaction> {
-        make_transactions_with_wallet_context(self.get_wallet_mut(), max_txn_num).await
+    pub async fn make_transactions(&self, max_txn_num: usize) -> Vec<Transaction> {
+        batch_make_transfer_transactions(self.get_wallet(), max_txn_num).await
     }
 
     pub async fn build_transaction_remotely(
@@ -122,23 +139,21 @@ impl TestContext {
         // TODO cache this?
         let rpc_client = HttpClientBuilder::default().build(fn_rpc_url)?;
 
-        TransactionBytes::to_data(rpc_client.request(method, params).await?)
+        TransactionBlockBytes::to_data(rpc_client.request(method, params).await?)
     }
 
     async fn sign_and_execute(
         &self,
         txn_data: TransactionData,
         desc: &str,
-    ) -> SuiTransactionResponse {
+    ) -> SuiTransactionBlockResponse {
         let signature = self.get_context().sign(&txn_data, desc);
         let resp = self
             .get_fullnode_client()
-            .quorum_driver()
-            .execute_transaction(
-                Transaction::from_data(txn_data, Intent::default(), vec![signature])
-                    .verify()
-                    .unwrap(),
-                SuiTransactionResponseOptions::new()
+            .quorum_driver_api()
+            .execute_transaction_block(
+                Transaction::from_data(txn_data, vec![signature]),
+                SuiTransactionBlockResponseOptions::new()
                     .with_object_changes()
                     .with_balance_changes()
                     .with_effects()
@@ -147,10 +162,14 @@ impl TestContext {
             )
             .await
             .unwrap_or_else(|e| panic!("Failed to execute transaction for {}. {}", desc, e));
-        assert!(matches!(
-            resp.effects.as_ref().unwrap().status(),
-            SuiExecutionStatus::Success
-        ));
+        assert!(
+            matches!(
+                resp.effects.as_ref().unwrap().status(),
+                SuiExecutionStatus::Success
+            ),
+            "Failed to execute transaction for {desc}: {:?}",
+            resp
+        );
         resp
     }
 
@@ -204,7 +223,7 @@ impl TestContext {
             .client
             .get_fullnode_client()
             .read_api()
-            .get_transaction_with_options(digest, SuiTransactionResponseOptions::new())
+            .get_transaction_with_options(digest, SuiTransactionBlockResponseOptions::new())
             .await
         {
             Ok(_) => (true, digest, retry_times),
@@ -288,6 +307,7 @@ impl ClusterTest {
             TestCase::new(SharedCounterTest {}),
             TestCase::new(FullNodeExecuteTransactionTest {}),
             TestCase::new(FullNodeBuildPublishTransactionTest {}),
+            TestCase::new(CoinIndexTest {}),
         ];
 
         // TODO: improve the runner parallelism for efficiency

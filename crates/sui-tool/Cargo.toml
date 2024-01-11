@@ -7,30 +7,50 @@ publish = false
 edition = "2021"
 
 [dependencies]
-anemo.workspace = true
-anyhow = { version = "1.0.64", features = ["backtrace"] }
-tokio = { workspace = true, features = ["full"] }
+anyhow.workspace = true
+num_cpus.workspace = true
+bcs.workspace = true
 clap = { version = "4.1.4", features = ["derive"] }
-
-itertools = { version = "0.10.3", features = ["use_alloc"] }
-futures = "0.3.23"
-rocksdb = "0.20.1"
-tempfile = "3.3.0"
-strum_macros = "^0.24"
-strum = "0.24.1"
-eyre = "0.6.8"
-ron = "0.8.0"
-
-narwhal-types = { path = "../../narwhal/types" }
-sui-storage = { path = "../sui-storage" }
-sui-core = { path = "../sui-core" }
-sui-config = { path = "../sui-config" }
-sui-types = { path = "../sui-types" }
-sui-network = { path = "../sui-network" }
+colored.workspace = true
+comfy-table.workspace = true
+diesel.workspace = true
+eyre.workspace = true
+futures.workspace = true
+hex.workspace = true
+move-core-types.workspace = true
+itertools.workspace = true
+rocksdb.workspace = true
+ron.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+object_store.workspace = true
+indicatif.workspace = true
 
 anemo-cli.workspace = true
+anemo.workspace = true
 telemetry-subscribers.workspace = true
+tokio = { workspace = true, features = ["full"] }
 typed-store.workspace = true
+fastcrypto.workspace = true
 
-colored = "2.0.0"
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+narwhal-storage.workspace = true
+narwhal-types.workspace = true
+sui-config.workspace = true
+sui-core.workspace = true
+sui-indexer.workspace = true
+sui-network.workspace = true
+sui-snapshot.workspace = true
+sui-protocol-config.workspace = true
+sui-replay.workspace = true
+sui-sdk.workspace = true
+sui-storage.workspace = true
+sui-types.workspace = true
+sui-archival.workspace = true
+workspace-hack.workspace = true
+git-version.workspace = true
+const-str = "0.5.6"

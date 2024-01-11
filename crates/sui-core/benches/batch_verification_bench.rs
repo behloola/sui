@@ -12,8 +12,9 @@ use std::sync::Arc;
 use sui_core::test_utils::{make_cert_with_large_committee, make_dummy_tx};
 use sui_types::committee::Committee;
 use sui_types::crypto::{get_key_pair, AccountKeyPair, AuthorityKeyPair};
-use sui_types::messages::CertifiedTransaction;
+use sui_types::transaction::CertifiedTransaction;
 
+use fastcrypto_zkp::bn254::zk_login_api::ZkLoginEnv;
 use sui_core::signature_verifier::*;
 
 fn gen_certs(
@@ -24,7 +25,6 @@ fn gen_certs(
     let (receiver, _): (_, AccountKeyPair) = get_key_pair();
 
     let senders: Vec<_> = (0..count)
-        .into_iter()
         .map(|_| get_key_pair::<AccountKeyPair>())
         .collect();
 
@@ -55,7 +55,7 @@ fn async_verifier_bench(c: &mut Criterion) {
     group.sample_size(10);
 
     let registry = Registry::new();
-    let metrics = VerifiedDigestCacheMetrics::new(&registry);
+    let metrics = SignatureVerifierMetrics::new(&registry);
 
     let num_cpus = num_cpus::get() as u64;
     for num_threads in [1, num_cpus / 2, num_cpus] {
@@ -76,11 +76,14 @@ fn async_verifier_bench(c: &mut Criterion) {
                         committee.clone(),
                         batch_size,
                         metrics.clone(),
+                        vec![],
+                        ZkLoginEnv::Test,
+                        true,
+                        true,
                     ));
 
                     b.iter(|| {
                         let handles: Vec<_> = (0..(num_threads * over_subscription))
-                            .into_iter()
                             .map(|_| {
                                 let batch_verifier = batch_verifier.clone();
                                 let certs = certs.clone();

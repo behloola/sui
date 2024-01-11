@@ -5,37 +5,59 @@ use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
+use crate::Page;
 use sui_types::base_types::{
     EpochId, ObjectDigest, ObjectID, ObjectRef, SequenceNumber, TransactionDigest,
 };
 use sui_types::coin::CoinMetadata;
-
 use sui_types::error::SuiError;
 use sui_types::object::Object;
-
-use crate::Page;
+use sui_types::sui_serde::BigInt;
+use sui_types::sui_serde::SequenceNumber as AsSequenceNumber;
 
 pub type CoinPage = Page<Coin, ObjectID>;
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, PartialEq, Eq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Balance {
     pub coin_type: String,
     pub coin_object_count: usize,
+    #[schemars(with = "BigInt<u128>")]
+    #[serde_as(as = "BigInt<u128>")]
     pub total_balance: u128,
+    // TODO: This should be removed
+    #[schemars(with = "HashMap<BigInt<u64>, BigInt<u128>>")]
+    #[serde_as(as = "HashMap<BigInt<u64>, BigInt<u128>>")]
     pub locked_balance: HashMap<EpochId, u128>,
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+impl Balance {
+    pub fn zero(coin_type: String) -> Self {
+        Self {
+            coin_type,
+            coin_object_count: 0,
+            total_balance: 0,
+            locked_balance: HashMap::new(),
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, PartialEq, Eq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Coin {
     pub coin_type: String,
     pub coin_object_id: ObjectID,
+    #[schemars(with = "AsSequenceNumber")]
+    #[serde_as(as = "AsSequenceNumber")]
     pub version: SequenceNumber,
     pub digest: ObjectDigest,
+    #[schemars(with = "BigInt<u64>")]
+    #[serde_as(as = "BigInt<u64>")]
     pub balance: u64,
-    pub locked_until_epoch: Option<EpochId>,
     pub previous_transaction: TransactionDigest,
 }
 
@@ -45,7 +67,7 @@ impl Coin {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Clone)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SuiCoinMetadata {
     /// Number of decimal places the coin uses.

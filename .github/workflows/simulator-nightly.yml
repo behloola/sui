@@ -7,6 +7,15 @@ on:
   schedule:
     - cron: '0 9 * * *' # UTC timing is every day at 1am PST
   workflow_dispatch:
+    inputs:
+      sui_commit:
+        description: "commit to test"
+        type: string
+        required: true
+        default: origin/main
+
+env:
+  SUI_COMMIT: "${{ github.event.inputs.sui_commit || 'origin/main' }}"
 
 jobs:
   simtest:
@@ -20,12 +29,12 @@ jobs:
 
     steps:
       - name: Install Teleport
-        uses: teleport-actions/setup@75c810ac63a7e9b28ca4795c6111619f2a13ac71 # pin@v1
+        uses: teleport-actions/setup@8d23169da0f80ce14d25ed791272faa1c07f4f1e # pin@v1
         with:
           version: 11.3.1
       - name: Authorize against Teleport
         id: auth
-        uses: teleport-actions/auth@6e73aa03a98e781ca6692817fbb6e554640a56b3 # pin@v1
+        uses: teleport-actions/auth@9091dad16a564f3c5b9c2ec520b234a4872b6879 # pin@v1
         with:
           # Specify the publically accessible address of your Teleport proxy.
           proxy: proxy.mysten-int.com:443
@@ -35,35 +44,31 @@ jobs:
           # valid for. This is optional and defaults to "1h"
           certificate-ttl: 2h
 
-      # Cargo clean and git restore on any left over files from git checkout      
+      # Cargo clean and git restore on any left over files from git checkout, and deletes all remote tracking branches
       - name: Environment clean
         run: | 
-          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 5 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/sui && cargo clean && git restore ."
+          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 5 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && rm -rf ~/sui"
+          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 5 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/ && git clone git@github.com:MystenLabs/sui.git"
  
       # Deleting files in tmpfs that usually fill up pretty quickly after each run
       - name: Tmpfs clean
         run: |  
-          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 5 ssh ubuntu@simtest-01 "sudo rm -rf /tmp/*.*"
+          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 5 ssh ubuntu@simtest-01 "sudo rm -rf /tmp/*"
 
       # Checkout out the latest sui repo
       - name: Checkout sui repo
         run: |
-          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 10 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/sui && git fetch origin main && git rebase origin/main"
+          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 10 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/sui && git fetch origin && git rebase ${{ env.SUI_COMMIT  }}"
 
       # Setting up cargo and simtest
       - name: Install simtest
         run: |
           tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 10 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/sui && ./scripts/simtest/install.sh"
 
-      # Build simtest
-      - name: Build simtest
-        run: |
-          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 30 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 CARGO_NET_RETRY=10 RUST_BACKTRACE=short RUST_LOG=off cd ~/sui && ./scripts/simtest/cargo-simtest simtest build"
-
       # Run simulator tests
       - name: Run simtest
         run: |
-          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 120 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && MSIM_TEST_NUM=30 RUSTUP_MAX_RETRIES=10 SIM_STRESS_TEST_DURATION_SECS=300 CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 CARGO_NET_RETRY=10 RUST_BACKTRACE=short RUST_LOG=off USE_MOCK_CRYPTO=1 NUM_CPUS=24 cd ~/sui && ./scripts/simtest/simtest-run.sh"
+          tsh -i ${{ steps.auth.outputs.identity-file }} --ttl 120 ssh ubuntu@simtest-01 "source ~/.bashrc && source ~/.cargo/env && cd ~/sui && RUSTUP_MAX_RETRIES=10 CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 CARGO_NET_RETRY=10 RUST_BACKTRACE=short RUST_LOG=off USE_MOCK_CRYPTO=1 NUM_CPUS=24 ./scripts/simtest/simtest-run.sh"
   
   notify:
     name: Notify
@@ -78,6 +83,7 @@ jobs:
       uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b # pin@v3
     
     - name: Get sui commit
+      if: env.WORKFLOW_CONCLUSION == 'failure' # notify only if failure
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -85,6 +91,7 @@ jobs:
         echo "sui_sha=${sui_sha}" >> $GITHUB_ENV
 
     - name: Get link to logs
+      if: env.WORKFLOW_CONCLUSION == 'failure' # notify only if failure
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -92,7 +99,8 @@ jobs:
         echo "gh_job_link=${gh_job_link}" >> $GITHUB_ENV        
 
     - name: Post to slack
-      uses: slackapi/slack-github-action@936158bbe252e9a6062e793ea4609642c966e302 # pin@v1.21.0
+      if: env.WORKFLOW_CONCLUSION == 'failure' # notify only if failure
+      uses: slackapi/slack-github-action@v1.24.0 # pin@v1.21.0
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         SUI_SHA: ${{ env.sui_sha }}
@@ -127,7 +135,7 @@ jobs:
                 "type": "section",
                 "text": {
                   "type": "mrkdwn",
-                  "text": "To debug failures: `tsh ssh ubuntu@simtest-01` and look in the `/home/ubuntu/simtest_logs/{date}` folder for test results"
+                  "text": "@sui-core, to debug failures: `tsh ssh ubuntu@simtest-01` and look in the `/home/ubuntu/simtest_logs/{date}` folder for test results"
                 }
               }
             ]

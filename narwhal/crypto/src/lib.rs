@@ -18,7 +18,7 @@ use fastcrypto::{
 // This re-export allows using the trait-defined APIs
 pub use fastcrypto::traits;
 use serde::Serialize;
-use shared_crypto::intent::{AppId, Intent, IntentMessage, IntentScope, INTENT_PREFIX_LENGTH};
+use shared_crypto::intent::{Intent, IntentMessage, IntentScope, INTENT_PREFIX_LENGTH};
 
 ////////////////////////////////////////////////////////////////////////
 /// Type aliases selecting the signature algorithm for the code base.
@@ -43,6 +43,11 @@ pub type KeyPair = bls12381::min_sig::BLS12381KeyPair;
 
 pub type NetworkPublicKey = ed25519::Ed25519PublicKey;
 pub type NetworkKeyPair = ed25519::Ed25519KeyPair;
+
+pub type RandomnessSignature = fastcrypto_tbls::types::Signature;
+pub type RandomnessPartialSignature = fastcrypto_tbls::tbls::PartialSignature<RandomnessSignature>;
+pub type RandomnessPrivateKey =
+    fastcrypto_tbls::ecies::PrivateKey<fastcrypto::groups::bls12381::G2Element>;
 
 ////////////////////////////////////////////////////////////////////////
 
@@ -116,10 +121,5 @@ impl NarwhalAuthorityAggregateSignature for AggregateSignature {
 
 /// Wrap a message in an intent message. Currently in Narwhal, the scope is always IntentScope::HeaderDigest and the app id is AppId::Narwhal.
 pub fn to_intent_message<T>(value: T) -> IntentMessage<T> {
-    IntentMessage::new(
-        Intent::default()
-            .with_scope(IntentScope::HeaderDigest)
-            .with_app_id(AppId::Narwhal),
-        value,
-    )
+    IntentMessage::new(Intent::narwhal_app(IntentScope::HeaderDigest), value)
 }

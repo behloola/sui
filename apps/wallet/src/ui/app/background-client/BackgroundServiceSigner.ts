@@ -1,38 +1,32 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { type SerializedSignature, SignerWithProvider } from '@mysten/sui.js';
+import { type SerializedUIAccount } from '_src/background/accounts/Account';
+import { type SuiClient } from '@mysten/sui.js/client';
+import type { SerializedSignature } from '@mysten/sui.js/cryptography';
 
 import type { BackgroundClient } from '.';
-import type { JsonRpcProvider, SuiAddress } from '@mysten/sui.js';
+import { WalletSigner } from '../WalletSigner';
 
-export class BackgroundServiceSigner extends SignerWithProvider {
-    readonly #address: SuiAddress;
-    readonly #backgroundClient: BackgroundClient;
+export class BackgroundServiceSigner extends WalletSigner {
+	readonly #account: SerializedUIAccount;
+	readonly #backgroundClient: BackgroundClient;
 
-    constructor(
-        address: SuiAddress,
-        backgroundClient: BackgroundClient,
-        provider: JsonRpcProvider
-    ) {
-        super(provider);
-        this.#address = address;
-        this.#backgroundClient = backgroundClient;
-    }
+	constructor(account: SerializedUIAccount, backgroundClient: BackgroundClient, client: SuiClient) {
+		super(client);
+		this.#account = account;
+		this.#backgroundClient = backgroundClient;
+	}
 
-    async getAddress(): Promise<string> {
-        return this.#address;
-    }
+	async getAddress(): Promise<string> {
+		return this.#account.address;
+	}
 
-    signData(data: Uint8Array): Promise<SerializedSignature> {
-        return this.#backgroundClient.signData(this.#address, data);
-    }
+	signData(data: Uint8Array): Promise<SerializedSignature> {
+		return this.#backgroundClient.signData(this.#account.id, data);
+	}
 
-    connect(provider: JsonRpcProvider): SignerWithProvider {
-        return new BackgroundServiceSigner(
-            this.#address,
-            this.#backgroundClient,
-            provider
-        );
-    }
+	connect(client: SuiClient) {
+		return new BackgroundServiceSigner(this.#account, this.#backgroundClient, client);
+	}
 }
